@@ -1,6 +1,38 @@
-#Parrot ESP Project
+# Parrot ESP Project
 
-This is the parrotpi project, originally found at ../parrotpi, but converted for use on an ESP32.
+(Note: This is based on the `parrotpi` Raspberry Pi project, originally found at `../parrotpi`, but converted for use on an ESP32.)
+
+This is a  web server for an ESP32-controlled anamatronic toy parrot. It serves a web page over a private Access Point (AP) SSID and
+sends REST calls to the server such as move beak open/close, increase/
+decrease volume, playback a phrase (previously recorded wav file), and
+provide a push-to-talk socketio microphone near-realtime stream to
+playback through the parrot.  It also has a few admin features that allow the user to save off his/her ad-hoc voice (when using push-to-talk capability) so that it can be replayed at a later tiome. When the parrot noises are played,
+the beak servo opens and closes while playing.  It also has a start
+up wav file that it plays upon start up to make sure that the sound card
+(MAX-98357A) was initialized properly and is working ok.
+
+## Software
+### IDE
+You'll need 
+- Arduino IDE and a USB cable between your PC and the ESP32 for downloading the executable software.
+- LittleFS IDE plugin
+
+- ESP Audio Library (see #include of main .ino file for specific library version)
+- WebSockets Library
+
+### Source Code
+- The main directory contains several test sub-directories which can be loaded onto an ESP32 for low-level testing, but the main project is under the `esp32_parrot_full` directory as an ino (C++) file.
+- Also under the directory is a subdirectory, `data`, containing supporting files:
+  - *.wav These are pre-recorded phrases that the parrot can be commanded to play back
+  - index.html This is the web page
+
+## Hardware
+- ESP32 
+- MAX-98357A amplifier/audio card
+- 4 Ohm Speaker
+- Micro servo (to control the parrot's beak)
+- Bespoke lever attached to beak and moved via the servo
+- Battery pack/w at least 5v/1.5A
 
 ## Notes about Beak Servo Pins
 -  Servo Orange -> ESP +5 (19)
