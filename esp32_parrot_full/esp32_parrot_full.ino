@@ -41,7 +41,7 @@ const int I2S_LRC   = 26;
 const int I2S_DOUT  = 25;
 
 // ----- Servo calibration -----
-const int BEAK_CLOSED_DEG = 90;
+const int BEAK_CLOSED_DEG = 75;
 const int BEAK_OPEN_DEG   = 30;
 
 // ----- Beak chatter timing (ms per open/close phase) -----
