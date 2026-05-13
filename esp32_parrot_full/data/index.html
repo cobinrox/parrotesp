@@ -1,0 +1,883 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ParrotPi (ESP32) 🦜</title>
+
+<style>
+  /* Reset and body */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: sans-serif;
+    background: #1a1a2e;
+    color: #eee;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    min-height: 100vh;
+    padding: 12px;
+    gap: 10px;
+  }
+
+  h1 { font-size: 2rem; letter-spacing: 2px; color: #f4c542; text-align:center; }
+
+  /* ── Talk button ── */
+  #holdButton {
+    width: 160px;
+    height: 160px;
+    border-radius: 50%;
+    border: none;
+    background: radial-gradient(circle at 40% 35%, #4caf50, #1b5e20);
+    color: white;
+    font-size: 1.1rem;
+    font-weight: bold;
+    text-align: center;
+    cursor: pointer;
+    box-shadow: 0 0 0 6px #2e7d3280, 0 8px 32px #0007;
+    transition: transform 0.1s, box-shadow 0.1s, background 0.15s;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+  }
+  #holdButton.active {
+    background: radial-gradient(circle at 40% 35%, #ef5350, #b71c1c);
+    box-shadow: 0 0 0 12px #ef535055, 0 8px 32px #0009;
+    transform: scale(0.96);
+  }
+
+  /* ── VU meter ── */
+  .meter-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  .meter-wrap.visible { opacity: 1; }
+
+  #vuMeter {
+    width: 220px;
+    height: 12px;
+    background: #333;
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  #vuBar {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #66bb6a, #f4c542, #ef5350);
+    border-radius: 6px;
+    transition: width 0.08s ease-out;
+  }
+  .meter-label { font-size: 0.75rem; color: #777; }
+
+  .quickBtn {
+    padding: 10px 16px;
+    font-size: 0.9rem;
+    border-radius: 8px;
+    cursor: pointer;
+    background: #2d2d44;
+    color: #eee;
+    border: 1px solid #555;
+    transition: background 0.15s, opacity 0.2s;
+  }
+  .quickBtn:hover { background: #3c3c5c; }
+
+  /* Busy-lock: all lockable controls dim and stop responding */
+  .ctrl-btn:disabled,
+  .ctrl-btn.busy-locked {
+    opacity: 0.35;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+  #holdButton:disabled,
+  #holdButton.busy-locked {
+    opacity: 0.35;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+
+  /* ── Replay dialog ── */
+  #replayDialog {
+    background: #1a1a2e;
+    color: #eee;
+    border: 1px solid #555;
+    border-radius: 12px;
+    padding: 20px;
+    min-width: 280px;
+    max-width: 340px;
+  }
+  #replayDialog::backdrop { background: rgba(0,0,0,0.65); }
+  #replayDialog h3 {
+    margin-bottom: 14px;
+    font-size: 1rem;
+    color: #f4c542;
+    letter-spacing: 1px;
+  }
+  .dialog-section {
+    border-top: 1px solid #333;
+    padding-top: 12px;
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .dialog-section:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
+  .dialog-label {
+    font-size: 0.75rem;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  #saveNameInput {
+    background: #2d2d44;
+    color: #eee;
+    border: 1px solid #555;
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 0.95rem;
+    width: 100%;
+  }
+  #manageSavedList {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 180px;
+    overflow-y: auto;
+  }
+  .manage-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .manage-row span {
+    flex: 1;
+    font-size: 0.9rem;
+    color: #ccc;
+  }
+  .delete-btn {
+    background: #5a1a1a;
+    border: 1px solid #c62828;
+    color: #ff8a80;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+  .delete-btn:hover { background: #7a2020; }
+  #replayDialog .close-btn, #adminDialog .close-btn {
+    margin-top: 16px;
+    background: #333;
+    color: #aaa;
+    border: 1px solid #555;
+    border-radius: 8px;
+    padding: 8px;
+    cursor: pointer;
+    width: 100%;
+    font-size: 0.85rem;
+  }
+
+  /* ── Admin dialog ── */
+  #adminDialog {
+    background: #1a1a2e;
+    color: #eee;
+    border: 1px solid #4db6ac;
+    border-radius: 12px;
+    padding: 20px;
+    min-width: 320px;
+    max-width: 420px;
+    width: 92vw;
+  }
+  #adminDialog::backdrop { background: rgba(0,0,0,0.65); }
+  .admin-dialog-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+  }
+  .admin-dialog-header h3 { font-size: 1rem; color: #80cbc4; letter-spacing: 1px; margin: 0; }
+  .dialog-x-btn {
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 1.3rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 2px;
+  }
+  .dialog-x-btn:hover { color: #eee; }
+  .admin-stub {
+    opacity: 0.35;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+  .network-info {
+    background: #0d2a30;
+    border: 1px solid #2a5a60;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 0.85rem;
+    color: #80cbc4;
+    margin-bottom: 6px;
+  }
+
+  #micRequestBtn {
+    padding: 12px 24px;
+    font-size: 1rem;
+    font-weight: bold;
+    border-radius: 10px;
+    cursor: pointer;
+    background: #7c4d00;
+    color: #fff;
+    border: 2px solid #f4c542;
+    letter-spacing: 1px;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  #micRequestBtn:hover  { background: #a06000; }
+  #micRequestBtn.granted { background: #1b5e20; border-color: #4caf50; cursor: default; }
+  #micRequestBtn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+  /* ── Info icon + tip bubble ── */
+  .info-wrap { display: flex; align-items: center; gap: 8px; position: relative; }
+  .info-btn {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    border: none;
+    background: #1976d2;
+    color: #fff;
+    font-size: 0.8rem;
+    font-weight: bold;
+    font-style: italic;
+    font-family: Georgia, serif;
+    line-height: 1;
+    cursor: pointer;
+    flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .info-btn:hover { background: #1565c0; }
+  .info-tip {
+    display: none;
+    position: absolute;
+    left: 0; top: calc(100% + 8px);
+    background: #2d2d44;
+    border: 1px solid #555;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 0.8rem;
+    color: #ccc;
+    line-height: 1.4;
+    max-width: 240px;
+    z-index: 10;
+    box-shadow: 0 4px 16px #0008;
+  }
+  .info-tip.visible { display: block; }
+
+  /* ── Save/Replay compact button ── */
+  .save-replay-btn {
+    padding: 5px 18px;
+    font-size: 0.8rem;
+  }
+
+  /* ── More… dropdown ── */
+  .more-wrap { position: relative; display: inline-block; }
+  #moreDropdown {
+    display: none;
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: #2d2d44;
+    border: 1px solid #555;
+    border-radius: 8px;
+    min-width: 160px;
+    max-height: 50vh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    z-index: 20;
+    box-shadow: 0 6px 20px #0009;
+  }
+  #moreDropdown.visible { display: block; }
+  #moreDropdown button {
+    display: block;
+    width: 100%;
+    padding: 10px 16px;
+    background: none;
+    border: none;
+    border-bottom: 1px solid #3a3a55;
+    color: #eee;
+    font-size: 0.9rem;
+    text-align: left;
+    cursor: pointer;
+  }
+  #moreDropdown button:last-child { border-bottom: none; }
+  #moreDropdown button:hover { background: #3c3c5c; }
+  #moreDropdown .dropdown-empty {
+    padding: 10px 16px;
+    color: #666;
+    font-size: 0.85rem;
+    font-style: italic;
+  }
+</style>
+</head>
+<body>
+
+<div style="display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; justify-content:center;">
+  <h1>🦜 ParrotPi <span style="font-size:0.6em; color:#80cbc4;">(ESP32)</span></h1>
+  <div id="statusLine" style="font-size:1rem; color:#aaa;">Status: initialising…</div>
+</div>
+<div id="parrot"></div>
+
+<!-- VOLUME SLIDER -->
+<div style="width:280px; display:flex; gap:8px; align-items:center; margin-top:4px;">
+  <span style="font-size:0.8rem; color:#aaa; white-space:nowrap; width:36px;">vol</span>
+  <input id="volumeSlider" type="range" min="0" max="100" value="50" step="5" style="flex:1;">
+  <span id="volumeValue" style="width:36px; text-align:right; font-size:0.85rem;">50%</span>
+</div>
+
+<!-- PITCH SLIDER -->
+<div style="width:280px; display:flex; gap:8px; align-items:center; margin-top:4px;">
+  <span style="font-size:0.8rem; color:#aaa; white-space:nowrap; width:36px;">pitch</span>
+  <input id="parrotSlider" type="range" min="5" max="90" value="20" step="5" style="flex:1;">
+  <span id="parrotValue" style="width:36px; text-align:right; font-size:0.85rem;">+20%</span>
+</div>
+
+<div class="info-wrap">
+  <button id="micRequestBtn" onclick="requestMic()">🎤 Enable Mic</button>
+  <button class="info-btn" onclick="toggleTip('micTip')" type="button">i</button>
+  <div id="micTip" class="info-tip">Tap to grant microphone access. Required before you can use Hold to Talk. (Note: live streaming not yet wired into ESP32 firmware.)</div>
+</div>
+
+<div class="info-wrap">
+  <button id="holdButton" class="ctrl-btn" disabled>HOLD TO<br>TALK (*)</button>
+  <button class="info-btn" onclick="toggleTip('httTip')" type="button">i</button>
+  <div id="httTip" class="info-tip">Press and hold to speak — your voice will play through the parrot. Streaming over WebSocket is not yet implemented on the ESP32 port.</div>
+</div>
+
+<button onclick="openReplayDialog()" class="quickBtn ctrl-btn save-replay-btn">Save / Replay</button>
+
+<div class="meter-wrap" id="meterWrap">
+  <div id="vuMeter"><div id="vuBar"></div></div>
+  <span class="meter-label">mic level</span>
+</div>
+
+<!-- QUICK PHRASES ROW (populated dynamically from /clips) -->
+<div id="phraseRow" style="display:flex; gap:12px; margin-top:20px; flex-wrap:wrap; justify-content:center;">
+  <!-- buttons inserted by JS at startup -->
+  <button class="quickBtn ctrl-btn" disabled>loading…</button>
+  <div class="more-wrap">
+    <button onclick="openMoreDropdown()" class="quickBtn ctrl-btn">More…</button>
+    <div id="moreDropdown">
+      <div class="dropdown-empty">No saved phrases yet</div>
+    </div>
+  </div>
+</div>
+
+<!-- STOP / RESTART / SHUTDOWN / ADMIN BUTTONS -->
+<div style="margin-top:24px; border-top:1px solid #333; padding-top:16px; width:100%; display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
+  <button id="stopBtn" onclick="stopAll()"
+    style="padding:6px 16px; font-size:0.8rem; font-weight:bold; border-radius:8px;
+           cursor:pointer; background:#c62828; color:#fff; border:2px solid #ff5252;
+           letter-spacing:1px; box-shadow:0 0 14px #c6282866; transition:background 0.15s;">
+    ⛔ Stop
+  </button>
+  <button id="restartBtn" onclick="restartServer()"
+    style="padding:6px 16px; font-size:0.8rem; font-weight:bold; border-radius:8px;
+           cursor:pointer; background:#4a0000; color:#ff8a80; border:1px solid #c62828;
+           letter-spacing:1px; transition:background 0.15s;">
+    ⟳ Restart
+  </button>
+  <button id="shutdownBtn" disabled title="Not applicable on ESP32"
+    style="padding:6px 16px; font-size:0.8rem; font-weight:bold; border-radius:8px;
+           cursor:not-allowed; background:#7b1fa2; color:#fff; border:2px solid #ce93d8;
+           letter-spacing:1px; box-shadow:0 0 10px #7b1fa266; opacity:0.4;">
+    ⏻ Shutdown
+  </button>
+  <button onclick="document.getElementById('adminDialog').showModal()"
+    style="padding:6px 16px; font-size:0.8rem; font-weight:bold; border-radius:8px;
+           cursor:pointer; background:#1a3a4a; color:#80cbc4; border:1px solid #4db6ac;
+           letter-spacing:1px; transition:background 0.15s;">
+    ⚙️ Admin…
+  </button>
+</div>
+
+<!-- REPLAY DIALOG -->
+<dialog id="replayDialog">
+  <div style="display:flex; align-items:center; gap:8px; margin-bottom:14px;">
+    <h3 style="margin:0; font-size:1rem; color:#f4c542; letter-spacing:1px;">💾 Save My Last Phrase</h3>
+    <button class="info-btn" onclick="toggleTip('saveDialogTip')" type="button">i</button>
+    <div id="saveDialogTip" class="info-tip" style="top:calc(100% + 6px); left:0;">
+      After using Hold to Talk, open this dialog to replay what you said or save it as a named phrase — then play it again anytime using the More… button.
+    </div>
+  </div>
+
+  <div class="dialog-section">
+    <span class="dialog-label">Last Recorded</span>
+    <button class="quickBtn" onclick="playLast()">▶ Play Last Phrase</button>
+  </div>
+
+  <div class="dialog-section">
+    <span class="dialog-label">Save Last Phrase As</span>
+    <div style="display:flex; gap:8px;">
+      <input id="saveNameInput" type="text" maxlength="24" autocomplete="off" autocorrect="off" spellcheck="false">
+      <button class="quickBtn admin-stub" onclick="savePhrase()" style="white-space:nowrap;" title="Not yet implemented">💾 Save</button>
+    </div>
+  </div>
+
+  <div class="dialog-section">
+    <span class="dialog-label">Manage Saved Phrases</span>
+    <div id="manageSavedList"><em style="color:#666; font-size:0.85rem;">Loading…</em></div>
+  </div>
+
+  <button class="close-btn" onclick="document.getElementById('replayDialog').close()">Close</button>
+</dialog>
+
+<!-- ADMIN DIALOG -->
+<dialog id="adminDialog">
+  <div class="admin-dialog-header">
+    <h3>⚙️ Admin</h3>
+    <button class="dialog-x-btn" onclick="document.getElementById('adminDialog').close()">✕</button>
+  </div>
+
+  <!-- NETWORK -->
+  <div class="dialog-section">
+    <div class="info-wrap">
+      <span class="dialog-label">Network</span>
+      <button class="info-btn" onclick="toggleTip('networkInfoTip')" type="button">i</button>
+      <div id="networkInfoTip" class="info-tip">View diagnostic information about your network connection. (ESP32 port shows AP info only — STA mode not yet implemented.)</div>
+    </div>
+    <button class="quickBtn" onclick="document.getElementById('networkInfoModal').showModal(); loadNetworkInfo()" style="width:100%; margin-top:6px;">📡 Network Info…</button>
+  </div>
+
+  <!-- BEAK / HEAD CONTROLS -->
+  <div class="dialog-section">
+    <span class="dialog-label">Beak &amp; Head</span>
+    <div style="display:flex; gap:8px;">
+      <button class="quickBtn admin-stub" title="Head servo not yet wired" style="flex:1;">« head</button>
+      <button onclick="beakClose()" class="quickBtn ctrl-btn" style="flex:1;">Beak Close</button>
+      <button onclick="beakOpen()"  class="quickBtn ctrl-btn" style="flex:1;">Beak Open</button>
+      <button class="quickBtn admin-stub" title="Head servo not yet wired" style="flex:1;">head »</button>
+    </div>
+  </div>
+
+  <!-- PHRASES -->
+  <div class="dialog-section">
+    <span class="dialog-label">Phrases</span>
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+      <button class="quickBtn admin-stub" title="Not yet implemented">📂 Add Phrases…</button>
+      <button class="quickBtn admin-stub" title="Not yet implemented">🗑 Remove Phrases…</button>
+    </div>
+  </div>
+
+  <!-- LANGUAGE -->
+  <div class="dialog-section">
+    <span class="dialog-label">Language</span>
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+      <button class="quickBtn admin-stub" title="Not yet implemented">🇺🇸 English</button>
+      <button class="quickBtn admin-stub" title="Not yet implemented">🇪🇸 Spanish</button>
+      <button class="quickBtn admin-stub" title="Not yet implemented">🇩🇪 German</button>
+      <button class="quickBtn admin-stub" title="Not yet implemented">🇫🇷 French</button>
+    </div>
+  </div>
+
+  <button class="close-btn" onclick="document.getElementById('adminDialog').close()">Close</button>
+</dialog>
+
+<!-- NETWORK INFO MODAL -->
+<dialog id="networkInfoModal" style="background:#1a1a2e; color:#eee; border:1px solid #4db6ac; border-radius:12px; padding:20px; min-width:360px; max-width:520px; width:92vw; max-height:80vh; overflow-y:auto;">
+  <div class="admin-dialog-header">
+    <h3>📡 Network Information</h3>
+    <button class="dialog-x-btn" onclick="document.getElementById('networkInfoModal').close()">✕</button>
+  </div>
+
+  <div style="margin-bottom:16px;">
+    <div style="font-size:0.9rem; font-weight:bold; color:#80cbc4; margin-bottom:8px; border-bottom:1px solid #2a5a60; padding-bottom:4px;">Connection</div>
+    <div style="font-size:0.85rem; line-height:1.6; color:#aaa;">
+      <div><span style="color:#f4c542;">Mode:</span> <span id="netMode">…</span></div>
+      <div><span style="color:#f4c542;">AP SSID:</span> <span id="netSSID">…</span></div>
+      <div><span style="color:#f4c542;">AP IP:</span> <span id="netIP">…</span></div>
+      <div><span style="color:#f4c542;">Clients connected:</span> <span id="netClients">…</span></div>
+    </div>
+  </div>
+
+  <div style="margin-bottom:16px;">
+    <div style="font-size:0.9rem; font-weight:bold; color:#80cbc4; margin-bottom:8px; border-bottom:1px solid #2a5a60; padding-bottom:4px;">Device</div>
+    <div style="font-size:0.85rem; line-height:1.6; color:#aaa;">
+      <div><span style="color:#f4c542;">Chip:</span> <span id="netChip">…</span></div>
+      <div><span style="color:#f4c542;">MAC:</span> <span id="netMAC">…</span></div>
+      <div><span style="color:#f4c542;">Free heap:</span> <span id="netHeap">…</span></div>
+      <div><span style="color:#f4c542;">Uptime:</span> <span id="netUptime">…</span></div>
+    </div>
+  </div>
+
+  <button class="close-btn" onclick="document.getElementById('networkInfoModal').close()">Close</button>
+</dialog>
+
+
+<!-- ===================================================================
+     ESP32 port — NO Socket.IO, NO PCM AudioWorklet (firmware doesn't
+     stream audio yet). All controls map to GET endpoints on the ESP32.
+     =================================================================== -->
+<script>
+"use strict";
+
+let micStream;
+let micReady = false;
+let hardwareBusy = false;
+let micActive = false;
+const holdButton  = document.getElementById("holdButton");
+const meterWrap   = document.getElementById("meterWrap");
+
+// ------------------------------------------------------------
+// Helpers
+// ------------------------------------------------------------
+async function api(path) {
+  try {
+    const r = await fetch(path, { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const ct = r.headers.get("content-type") || "";
+    return ct.includes("json") ? r.json() : r.text();
+  } catch (e) {
+    console.warn("api error", path, e);
+    throw e;
+  }
+}
+
+function debounce(fn, ms) {
+  let h;
+  return (...args) => { clearTimeout(h); h = setTimeout(() => fn(...args), ms); };
+}
+
+// ------------------------------------------------------------
+// Mic permission (UI placeholder; firmware doesn't stream yet)
+// ------------------------------------------------------------
+async function requestMic() {
+  const btn = document.getElementById("micRequestBtn");
+  btn.disabled = true;
+  btn.textContent = "Requesting…";
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach(t => t.stop()); // just needed the permission grant
+    micReady = true;
+    btn.textContent = "🎤 Mic Ready ✓";
+    btn.classList.add("granted");
+    holdButton.disabled = hardwareBusy;
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = "🎤 Enable Mic (retry)";
+    console.error("Mic permission denied:", err);
+  }
+}
+
+// ------------------------------------------------------------
+// Hold to Talk — UI shell only; no streaming yet.
+// When firmware gains a /ws/audio WebSocket, fill in startMic/stopMic.
+// ------------------------------------------------------------
+function startMic() {
+  if (!micReady) return;
+  micActive = true;
+  meterWrap.classList.add("visible");
+  // TODO: open WebSocket to ws://<ip>/ws/audio and stream PCM chunks
+}
+
+function stopMic() {
+  if (!micActive) return;
+  micActive = false;
+  holdButton.classList.remove("active");
+  holdButton.style.background = `radial-gradient(circle at 40% 35%, #4caf50, #1b5e20)`;
+  meterWrap.classList.remove("visible");
+  document.getElementById("vuBar").style.width = "0%";
+  // TODO: close WebSocket; firmware will save received audio as last_recording.wav
+}
+
+// ------------------------------------------------------------
+// UI wiring — Hold button + sliders
+// ------------------------------------------------------------
+function initUI() {
+  holdButton.addEventListener("pointerdown", (e) => {
+    if (holdButton.disabled) return;
+    holdButton.setPointerCapture(e.pointerId);
+    holdButton.classList.add("active");
+    startMic();
+  });
+  holdButton.addEventListener("pointerup",     stopMic);
+  holdButton.addEventListener("pointercancel", stopMic);
+
+  const parrotSlider = document.getElementById("parrotSlider");
+  const parrotValue  = document.getElementById("parrotValue");
+  parrotSlider.addEventListener("input", () => {
+    const pct = parseInt(parrotSlider.value);
+    parrotValue.textContent = "+" + pct + "%";
+    setParrot(pct);
+  });
+
+  const volumeSlider = document.getElementById("volumeSlider");
+  const volumeValue  = document.getElementById("volumeValue");
+  volumeSlider.addEventListener("input", () => {
+    const vol = parseInt(volumeSlider.value);
+    volumeValue.textContent = vol + "%";
+    setVolume(vol);
+  });
+}
+
+// ------------------------------------------------------------
+// Volume — UI 0..100 maps to firmware 0.0..1.0
+// ------------------------------------------------------------
+const sendVolume = debounce(async (pct) => {
+  try {
+    const v = (pct / 100).toFixed(2);
+    await api(`/volume?v=${v}`);
+  } catch (err) { console.error("setVolume failed:", err); }
+}, 80);
+function setVolume(pct) { sendVolume(pct); }
+
+// ------------------------------------------------------------
+// Pitch — UI 5..90 means "+5%…+90%" → firmware pitch 1.05..1.90
+// ------------------------------------------------------------
+const sendParrot = debounce(async (pct) => {
+  try {
+    const p = (1 + pct / 100).toFixed(2);
+    await api(`/pitch?p=${p}`);
+  } catch (err) { console.error("setParrot failed:", err); }
+}, 80);
+function setParrot(pct) { sendParrot(pct); }
+
+// ------------------------------------------------------------
+// Phrases — populated dynamically from /clips
+// ------------------------------------------------------------
+async function loadPhrases() {
+  const row = document.getElementById("phraseRow");
+  // Keep the More… wrapper in place; rebuild buttons before it.
+  const moreWrap = row.querySelector(".more-wrap");
+  Array.from(row.querySelectorAll("button.ctrl-btn:not(.quickBtn[onclick='openMoreDropdown()'])"))
+       .forEach(b => b.remove());
+  // Simpler: clear everything except the More wrap, then re-insert buttons in front of it.
+  row.innerHTML = "";
+  try {
+    const data = await api("/clips");
+    const clips = (data && data.clips) ? data.clips : [];
+    if (clips.length === 0) {
+      const b = document.createElement("button");
+      b.className = "quickBtn ctrl-btn";
+      b.disabled = true;
+      b.textContent = "no clips on flash";
+      row.appendChild(b);
+    } else {
+      // First N as primary buttons, rest go to More… dropdown
+      const PRIMARY_MAX = 4;
+      const primary = clips.slice(0, PRIMARY_MAX);
+      window._extraClips = clips.slice(PRIMARY_MAX);
+      for (const name of primary) {
+        const b = document.createElement("button");
+        b.className = "quickBtn ctrl-btn";
+        b.textContent = name;
+        b.addEventListener("click", () => sayPhrase(name));
+        row.appendChild(b);
+      }
+    }
+  } catch (e) {
+    const b = document.createElement("button");
+    b.className = "quickBtn ctrl-btn";
+    b.disabled = true;
+    b.textContent = "error loading clips";
+    row.appendChild(b);
+  }
+  // Re-attach the More… wrap (always present)
+  row.appendChild(moreWrap);
+}
+
+function sayPhrase(name) {
+  setHardwareStatus(true, "audio");
+  api("/play?clip=" + encodeURIComponent(name)).catch(() => {});
+}
+
+// ------------------------------------------------------------
+// Beak (no head servo on ESP32 yet)
+// ------------------------------------------------------------
+function beakOpen()  { api("/beak/open").catch(() => {}); }
+function beakClose() { api("/beak/close").catch(() => {}); }
+
+// ------------------------------------------------------------
+// Hardware status polling (every 2s) — mirrors original
+// ------------------------------------------------------------
+function setHardwareStatus(busy, reason) {
+  hardwareBusy = busy;
+  const statusLine = document.getElementById("statusLine");
+  if (statusLine) {
+    const statusText = busy ? `Busy (${reason})` : "Ready";
+    statusLine.textContent = `Status: ${statusText}`;
+    document.title = `ParrotPi: ${statusText}`;
+  }
+  // Lock all ctrl-btn elements (STOP/Restart/Admin are outside the class on purpose)
+  document.querySelectorAll(".ctrl-btn").forEach(btn => {
+    if (btn === holdButton) {
+      btn.disabled = (busy || !micReady) && !micActive;
+    } else {
+      btn.disabled = busy;
+    }
+  });
+}
+
+async function refreshHardwareStatus() {
+  try {
+    const s = await api("/status");
+    const busy = !!(s.playing && s.playing.length > 0);
+    const reason = busy ? "audio" : "idle";
+    setHardwareStatus(busy, reason);
+
+    // Reflect firmware-side volume/pitch in the UI, unless user is touching a slider
+    if (typeof s.volume === "number") {
+      const pct = Math.round(s.volume * 100);
+      const slider = document.getElementById("volumeSlider");
+      if (document.activeElement !== slider) {
+        slider.value = pct;
+        document.getElementById("volumeValue").textContent = pct + "%";
+      }
+    }
+    if (typeof s.pitch === "number") {
+      const pct = Math.round((s.pitch - 1) * 100);
+      const slider = document.getElementById("parrotSlider");
+      if (document.activeElement !== slider) {
+        slider.value = Math.max(5, Math.min(90, pct));
+        document.getElementById("parrotValue").textContent = "+" + pct + "%";
+      }
+    }
+  } catch (err) {
+    console.error("status fetch failed:", err);
+  }
+}
+
+// ------------------------------------------------------------
+// Stop / Restart / Shutdown (shutdown disabled on ESP32)
+// ------------------------------------------------------------
+async function stopAll() {
+  try {
+    stopMic();
+    await api("/stop");
+    await refreshHardwareStatus();
+  } catch (err) { console.error("stop failed:", err); }
+}
+
+async function restartServer() {
+  if (!confirm("Restart the ESP32?")) return;
+  const btn = document.getElementById("restartBtn");
+  btn.textContent = "Restarting…";
+  btn.disabled = true;
+  try { await api("/restart"); } catch (_) {}
+  document.getElementById("statusLine").textContent = "Status: ESP32 restarting…";
+  // Poll until it comes back
+  const poll = setInterval(async () => {
+    try { await fetch('/'); clearInterval(poll); window.location.reload(); }
+    catch (_) {}
+  }, 1500);
+}
+
+// ------------------------------------------------------------
+// More… dropdown — overflow clips that didn't fit in the primary row
+// ------------------------------------------------------------
+function openMoreDropdown() {
+  const dropdown = document.getElementById('moreDropdown');
+  const isVisible = dropdown.classList.contains('visible');
+  dropdown.classList.remove('visible');
+  if (isVisible) return;
+
+  const extras = window._extraClips || [];
+  if (extras.length === 0) {
+    dropdown.innerHTML = '<div class="dropdown-empty">No additional phrases</div>';
+  } else {
+    dropdown.innerHTML = extras.map(name =>
+      `<button onclick="sayPhrase('${name}'); document.getElementById('moreDropdown').classList.remove('visible');">▶ ${name}</button>`
+    ).join('');
+  }
+  dropdown.classList.add('visible');
+}
+
+// ------------------------------------------------------------
+// Save / Replay dialog — mostly stubbed until firmware supports it
+// ------------------------------------------------------------
+function openReplayDialog() {
+  const dialog = document.getElementById('replayDialog');
+  dialog.showModal();
+  refreshSaveDialog();
+}
+async function refreshSaveDialog() {
+  const manageEl = document.getElementById('manageSavedList');
+  manageEl.innerHTML = '<em style="color:#666; font-size:0.85rem;">Save/replay/manage not yet implemented on ESP32. Bulk-upload WAVs via the LittleFS plugin for now.</em>';
+  document.getElementById('saveNameInput').value = '';
+  document.getElementById('saveNameInput').disabled = true;
+}
+function playLast() {
+  document.getElementById('replayDialog').close();
+  // Convention: a clip named "last_recording" if/when firmware saves one
+  api("/play?clip=last_recording").catch(() => {});
+}
+function savePhrase() { /* stub */ }
+function deletePhrase(_n) { /* stub */ }
+
+// strip non-[a-z0-9] in the save name input
+document.addEventListener('DOMContentLoaded', () => {
+  const input = document.getElementById('saveNameInput');
+  if (input) input.addEventListener('input', () => {
+    const clean = input.value.replace(/[^a-z0-9]/g, '');
+    if (clean !== input.value) input.value = clean;
+  });
+});
+
+// ------------------------------------------------------------
+// Info tip toggles + outside-tap dismiss
+// ------------------------------------------------------------
+function toggleTip(id) {
+  const tip = document.getElementById(id);
+  const isVisible = tip.classList.contains('visible');
+  document.querySelectorAll('.info-tip').forEach(t => t.classList.remove('visible'));
+  if (!isVisible) tip.classList.add('visible');
+}
+document.addEventListener('pointerdown', (e) => {
+  if (!e.target.closest('.info-wrap'))
+    document.querySelectorAll('.info-tip').forEach(t => t.classList.remove('visible'));
+  if (!e.target.closest('.more-wrap'))
+    document.getElementById('moreDropdown').classList.remove('visible');
+});
+
+// ------------------------------------------------------------
+// Network Info modal — ESP32 reports AP and device info via /netinfo
+// ------------------------------------------------------------
+function fmtUptime(ms) {
+  if (!ms || ms < 0) return "—";
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+  return `${h}h ${m}m ${ss}s`;
+}
+async function loadNetworkInfo() {
+  for (const id of ["netMode","netSSID","netIP","netClients","netChip","netMAC","netHeap","netUptime"]) {
+    document.getElementById(id).textContent = "…";
+  }
+  try {
+    const d = await api("/netinfo");
+    document.getElementById("netMode").textContent     = d.mode || "AP";
+    document.getElementById("netSSID").textContent     = d.ssid || "—";
+    document.getElementById("netIP").textContent       = d.ip || "—";
+    document.getElementById("netClients").textContent  = (typeof d.clients === "number") ? d.clients : "—";
+    document.getElementById("netChip").textContent     = d.chip || "ESP32";
+    document.getElementById("netMAC").textContent      = d.mac || "—";
+    document.getElementById("netHeap").textContent     = (typeof d.heap === "number") ? (d.heap + " B") : "—";
+    document.getElementById("netUptime").textContent   = fmtUptime(d.uptime_ms);
+  } catch (e) {
+    document.getElementById("netMode").textContent = "error";
+  }
+}
+
+// ------------------------------------------------------------
+// Startup
+// ------------------------------------------------------------
+window.addEventListener("load", () => {
+  initUI();
+  loadPhrases();
+  refreshHardwareStatus();
+  setInterval(refreshHardwareStatus, 2000);
+});
+</script>
+</body>
+</html>
