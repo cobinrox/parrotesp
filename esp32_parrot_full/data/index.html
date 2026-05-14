@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>ParrotPi (ESP32) 🦜</title>
 
 <style>
@@ -347,19 +350,19 @@
 <div class="info-wrap">
   <button id="micRequestBtn" onclick="requestMic()">🎤 Enable Mic</button>
   <button class="info-btn" onclick="toggleTip('micTip')" type="button">i</button>
-  <div id="micTip" class="info-tip">Tap to grant microphone access. Required before you can use Hold to Talk. (Live PCM over WebSocket is not wired yet; use &quot;Test WS :81 echo&quot; to verify the socket path.)</div>
+  <div id="micTip" class="info-tip">Tap to grant microphone access. Required before you can use Hold to Talk. (Live PCM over WebSocket is not wired yet; use &quot;Test WS&quot; to verify <code>wss://…/ws</code>.)</div>
 </div>
 
 <div class="info-wrap">
   <button id="holdButton" class="ctrl-btn" disabled>HOLD TO<br>TALK (*)</button>
   <button class="info-btn" onclick="toggleTip('httTip')" type="button">i</button>
-  <div id="httTip" class="info-tip">Press and hold to speak — your voice will play through the parrot. PCM streaming is not wired yet; use &quot;Test WS :81 echo&quot; below to verify the WebSocket port.</div>
+  <div id="httTip" class="info-tip">Press and hold to speak — your voice will play through the parrot. PCM streaming is not wired yet; use &quot;Test WS&quot; below to verify the secure WebSocket path.</div>
 </div>
 
 <div class="info-wrap" style="max-width:340px; width:100%;">
-  <button type="button" class="quickBtn" id="wsEchoBtn" onclick="testWsEcho()">Test WS :81 (echo + tone)</button>
+  <button type="button" class="quickBtn" id="wsEchoBtn" onclick="testWsEcho()">Test WS (echo + tone)</button>
   <button class="info-btn" onclick="toggleTip('wsTip')" type="button">i</button>
-  <div id="wsTip" class="info-tip">Opens <code>ws://&lt;this-host&gt;:81/</code>: first a text + tiny binary echo check, then a 512-byte 16 kHz mono PCM burst (~440 Hz tone) for the I2S path. Wait for startup clip to finish (or use /stop) before expecting the tone.</div>
+  <div id="wsTip" class="info-tip">Opens <code>wss://&lt;this-host&gt;/ws</code> (or <code>ws://…</code> if you opened the page over plain HTTP): text + tiny binary echo, then a PCM tone burst. Wait for startup clip to finish (or use /stop) before expecting the tone.</div>
   <pre id="wsEchoOut" style="font-size:0.72rem; color:#aed581; margin-top:8px; white-space:pre-wrap; width:100%; max-height:120px; overflow:auto; background:#12121f; padding:8px; border-radius:6px; border:1px solid #333;"></pre>
 </div>
 
@@ -558,15 +561,24 @@ function debounce(fn, ms) {
 }
 
 // ------------------------------------------------------------
-// WebSocket port 81 — echo bring-up + PCM tone (firmware steps 1 & 3)
+// WebSocket /ws — echo bring-up + PCM tone (HTTPS: wss://host/ws)
 // ------------------------------------------------------------
 function testWsEcho() {
   const out = document.getElementById("wsEchoOut");
   const btn = document.getElementById("wsEchoBtn");
   btn.disabled = true;
   out.textContent = "Connecting…";
-  const host = window.location.hostname || "192.168.4.1";
-  const ws = new WebSocket(`ws://${host}:81/`);
+  const wsScheme = location.protocol === "https:" ? "wss" : "ws";
+  const wsHost = location.hostname || "192.168.4.1";
+  const wsPort = location.port ? ":" + location.port : "";
+  const wsUrl = wsScheme + "://" + wsHost + wsPort + "/ws";
+  if (location.protocol === "https:" && !wsUrl.startsWith("wss:")) {
+    out.textContent = "Internal error: expected wss: URL on HTTPS page.";
+    btn.disabled = false;
+    return;
+  }
+  console.log("Parrot WebSocket URL:", wsUrl);
+  const ws = new WebSocket(wsUrl);
   ws.binaryType = "arraybuffer";
   let lines = [];
   let recv = 0;
@@ -606,7 +618,7 @@ function testWsEcho() {
     }
   };
   ws.onerror = (event) => {
-    lines.push("possible socket error");
+    lines.push("WebSocket error (if URL is ws://…:81 you are running an OLD index.html — re-upload LittleFS + hard refresh)");
     lines.push("event type: " + event.type);
 
     console.log("WebSocket error event:", event);

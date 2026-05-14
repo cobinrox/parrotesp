@@ -15,9 +15,9 @@
 //   GET /restart                        - reboot the ESP32
 //   GET /netinfo                        - network/device info (JSON)
 //
-// WebSocket (port 81, parallel to HTTP 80):
-//   ws://<AP_IP>:81/
-//   - Small TEXT / small BINARY frames: echoed (bring-up test).
+// HTTPS (port 443) + WebSocket on same server (wss://<AP_IP>/ws):
+//   - REST + index.html over TLS (self-signed cert.pem + key.pem on LittleFS).
+//   - Small TEXT / small BINARY WS frames: echoed (bring-up test).
 //   - Larger BINARY frames (walkie PCM): 16-bit little-endian mono @ 16 kHz,
 //     pushed to I2S via audioOut (library applies current SetGain volume).
 //     Ignored while a WAV clip is playing so the decoder keeps the I2S clock.
@@ -29,17 +29,17 @@
 // ===================================================================
 
 #include <WiFi.h>                         // built-in (ESP32 board package)
-#include <WebServer.h>                    // built-in
-#include <WebSocketsServer.h>             // EXTERNAL: "WebSockets" by Markus Sattler (WebSocketsServer)
 #include <LittleFS.h>                     // built-in (filesystem)
+#include "esp_http_server.h"
+#include "esp_https_server.h"
+#include "esp_log.h"
 #include <ESP32Servo.h>                   // EXTERNAL: install "ESP32Servo by Kevin Harrington, John K. Bennett"
 #include <AudioFileSourceLittleFS.h>      // EXTERNAL: install "ESP8266Audio by Earle F. Philhower, III"
 #include <AudioGeneratorWAV.h>             //   (all <AudioXxx.h> headers come from the ESP8266Audio package)
 #include <AudioOutputI2S.h>               //
 
-const char* VERSION = "0.2e";
-// d- can send tone from browser to parrot
-// e - added pub/private key in anticipation of https
+const char* VERSION = "0.3";
+// 0.3 — HTTPS :443 (esp_https_server) + WSS /ws (httpd WebSocket). Plain HTTP/WebSockets removed.
 
 
 // ----- WiFi Access Point -----
@@ -79,8 +79,8 @@ public:
   }
 };
 
-// ----- Web server -----
-WebServer server(80);
+// ----- HTTPS server (ESP-IDF httpd + TLS) -----
+static httpd_handle_t g_https = nullptr;
 
 // ----- Forward declaration so BeakAnimator can use setBeakAngle() -----
 void setBeakAngle(int deg);
@@ -148,50 +148,15 @@ AudioGeneratorWAV       *audioWav  = nullptr;
 PitchAudioOutputI2S     *audioOut  = nullptr;  // persistent; reused per clip
 String                   currentClip = "";
 
-// WebSocket server (port 81; needs audioOut for PCM path — declared after I2S pointer)
+// TLS PEM (heap) — pointers kept for lifetime of https server
+static char *g_cert_pem = nullptr;
+static char *g_key_pem  = nullptr;
+
 static void resetWsPcmStreamState();
 static void feedWsPcmToI2s(const uint8_t* payload, size_t length);
 
 static const int kWsPcmSampleRateHz = 16000;
 static bool g_wsPcmRatePrimed = false;
-
-WebSocketsServer webSocket(81);
-
-void webSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
-  switch (type) {
-    case WStype_DISCONNECTED:
-      Serial.printf("[WS %u] disconnect\n", num);
-      // If I2S was left running from PCM, DMA underruns sound like repeated clicks.
-      // flush() must only run while the channel is active (ConsumeSample is a no-op otherwise).
-      if (audioOut && g_wsPcmRatePrimed) {
-        audioOut->flush();
-        audioOut->stop();
-      }
-      resetWsPcmStreamState();
-      break;
-    case WStype_CONNECTED: {
-      IPAddress ip = webSocket.remoteIP(num);
-      Serial.printf("[WS %u] connect from %s\n", num, ip.toString().c_str());
-      break;
-    }
-    case WStype_TEXT:
-      webSocket.sendTXT(num, payload, length);
-      break;
-    case WStype_BIN: {
-      // Tiny binary frames keep the step-1 echo test working; larger chunks
-      // are treated as live mono PCM (browser worklet will use >=64 bytes).
-      static const size_t kWsPcmMinBytes = 64;
-      if (length >= kWsPcmMinBytes && (length & 1u) == 0) {
-        feedWsPcmToI2s(payload, length);
-      } else {
-        webSocket.sendBIN(num, payload, length);
-      }
-      break;
-    }
-    default:
-      break;
-  }
-}
 
 // ----- LED helper -----
 void setLed(bool on) {
@@ -327,179 +292,20 @@ bool startPlayback(const String &clipName) {
   return true;
 }
 
-// ----- HTTP handlers -----
-void handleRoot() {
-  if (LittleFS.exists("/index.html")) {
-    File f = LittleFS.open("/index.html", "r");
-    server.streamFile(f, "text/html");
-    f.close();
-    return;
-  }
-  // Fallback if the HTML wasn't uploaded yet
-  String msg = "ParrotPi server (no index.html on flash)\n";
-  msg += "GET /on, /off, /status, /beak/*, /play, /clips, /volume, /pitch, /stop, /restart, /netinfo\n";
-  server.send(200, "text/plain", msg);
-}
-
-void handleNetInfo() {
-  String body = "{";
-  body += "\"mode\":\"AP\",";
-  body += "\"ssid\":\""; body += AP_SSID; body += "\",";
-  body += "\"ip\":\"";   body += WiFi.softAPIP().toString(); body += "\",";
-  body += "\"clients\":"; body += WiFi.softAPgetStationNum(); body += ",";
-  body += "\"chip\":\"ESP32-WROOM-32D\",";
-  body += "\"mac\":\"";  body += WiFi.softAPmacAddress(); body += "\",";
-  body += "\"heap\":";   body += ESP.getFreeHeap(); body += ",";
-  body += "\"uptime_ms\":"; body += millis(); body += ",";
-  body += "\"ws_port\":81";
-  body += "}";
-  server.send(200, "application/json", body);
-}
-
-void handleOn()  { setLed(true);  server.send(200, "application/json", "{\"led\":\"on\"}"); }
-void handleOff() { setLed(false); server.send(200, "application/json", "{\"led\":\"off\"}"); }
-
-void handleStatus() {
-  String body = "{";
-  body += "\"led\":\"";       body += (ledOn ? "on" : "off");        body += "\",";
-  body += "\"beak_deg\":";    body += beakDeg;                       body += ",";
-  body += "\"beak_locked\":"; body += (beakLocked() ? "true" : "false"); body += ",";
-  body += "\"beak_owner\":\""; body += beakAnim.owner;               body += "\",";
-  body += "\"volume\":";      body += String(audioVolume, 2);        body += ",";
-  body += "\"pitch\":";       body += String(audioPitch, 2);         body += ",";
-  body += "\"playing\":\"";   body += currentClip;                   body += "\"";
-  body += "}";
-  server.send(200, "application/json", body);
-}
-
-// Manual beak control is refused whenever beakLocked() is true.
-// Returns true if request was accepted, false if rejected (response already sent).
-bool guardBeakOrReject() {
-  if (beakLocked()) {
-    String body = String("{\"error\":\"beak busy\",\"owner\":\"") + beakAnim.owner + "\"}";
-    server.send(409, "application/json", body);
-    return false;
-  }
-  return true;
-}
-
-void handleBeakOpen() {
-  if (!guardBeakOrReject()) return;
-  setBeakAngle(BEAK_OPEN_DEG);
-  Serial.print("Beak -> "); Serial.print(beakDeg); Serial.println(" deg (manual open)");
-  server.send(200, "application/json", "{\"beak\":\"open\"}");
-}
-
-void handleBeakClose() {
-  if (!guardBeakOrReject()) return;
-  setBeakAngle(BEAK_CLOSED_DEG);
-  Serial.print("Beak -> "); Serial.print(beakDeg); Serial.println(" deg (manual close)");
-  server.send(200, "application/json", "{\"beak\":\"closed\"}");
-}
-
-void handleBeakAngle() {
-  if (!server.hasArg("deg")) {
-    server.send(400, "application/json", "{\"error\":\"missing ?deg=N\"}");
-    return;
-  }
-  if (!guardBeakOrReject()) return;
-  setBeakAngle(server.arg("deg").toInt());
-  Serial.print("Beak -> "); Serial.print(beakDeg); Serial.println(" deg (manual angle)");
-  server.send(200, "application/json", String("{\"beak_deg\":") + beakDeg + "}");
-}
-
-void handlePlay() {
-  if (!server.hasArg("clip")) {
-    server.send(400, "application/json", "{\"error\":\"missing ?clip=NAME\"}");
-    return;
-  }
-  String clip = server.arg("clip");
-  if (startPlayback(clip)) {
-    server.send(200, "application/json", String("{\"playing\":\"") + clip + "\"}");
-  } else {
-    server.send(404, "application/json", String("{\"error\":\"clip not found: ") + clip + "\"}");
-  }
-}
-
-void handleStop() {
-  stopPlayback();
-  server.send(200, "application/json", "{\"playing\":\"\"}");
-}
-
-void handleClips() {
-  String body = "{\"clips\":[";
-  File root = LittleFS.open("/");
-  bool first = true;
-  if (root) {
-    File f = root.openNextFile();
-    while (f) {
-      String name = f.name();
-      if (name.startsWith("/")) name = name.substring(1);
-      if (name.endsWith(".wav")) {
-        if (!first) body += ",";
-        body += "\"";
-        body += name.substring(0, name.length() - 4);   // strip ".wav"
-        body += "\"";
-        first = false;
-      }
-      f.close();
-      f = root.openNextFile();
-    }
-    root.close();
-  }
-  body += "]}";
-  server.send(200, "application/json", body);
-}
-
-void handleVolume() {
-  if (!server.hasArg("v")) {
-    server.send(400, "application/json", "{\"error\":\"missing ?v=N\"}");
-    return;
-  }
-  float v = server.arg("v").toFloat();
-  if (v < 0.0f) v = 0.0f;
-  if (v > 1.0f) v = 1.0f;
-  audioVolume = v;
-  if (audioOut) audioOut->SetGain(audioVolume);   // applies immediately, even mid-clip
-  Serial.print("Volume -> "); Serial.println(audioVolume);
-  server.send(200, "application/json", String("{\"volume\":") + String(audioVolume, 2) + "}");
-}
-
-void handlePitch() {
-  if (!server.hasArg("p")) {
-    server.send(400, "application/json", "{\"error\":\"missing ?p=N\"}");
-    return;
-  }
-  float p = server.arg("p").toFloat();
-  if (p < 0.5f) p = 0.5f;
-  if (p > 2.0f) p = 2.0f;
-  audioPitch = p;
-  Serial.print("Pitch -> "); Serial.println(audioPitch);
-
-  // Re-apply rate immediately so a clip already playing changes pitch live.
-  // nativeHertz is 0 until the first SetRate has happened, so this is a no-op
-  // on a fresh boot before anything has played.
-  if (audioOut && audioOut->nativeHertz > 0) {
-    audioOut->pitchMultiplier = audioPitch;
-    audioOut->SetRate(audioOut->nativeHertz);   // runs through our override
-  }
-
-  server.send(200, "application/json", String("{\"pitch\":") + String(audioPitch, 2) + "}");
-}
-
-void handleRestart() {
-  server.send(200, "application/json", "{\"restart\":true}");
-  delay(200);
-  ESP.restart();
-}
-
-void handleNotFound() { server.send(404, "text/plain", "Not found"); }
+#include "https_ws_impl.inc"
 
 void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
   Serial.printf("=== ParrotPi (ESP32) v%s starting ===\n", VERSION);
+  // Browsers often open extra TCP connections to :443 that never finish TLS (self-signed cert,
+  // speculative connects). mbedTLS then logs -0x7780 (MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE).
+  // Harmless if the page and wss://…/ws still work. Mute these tags for a cleaner Serial Monitor;
+  // comment out to debug TLS handshakes.
+  esp_log_level_set("esp-tls-mbedtls", ESP_LOG_NONE);
+  esp_log_level_set("esp_https_server", ESP_LOG_NONE);
+  esp_log_level_set("httpd", ESP_LOG_NONE);
   // LED
   pinMode(LED_PIN, OUTPUT);
   setLed(false);
@@ -546,30 +352,13 @@ void setup() {
   }
   Serial.print("AP IP: "); Serial.println(WiFi.softAPIP());
 
-  // REST routes
-  server.on("/",            HTTP_GET, handleRoot);
-  server.on("/on",          HTTP_GET, handleOn);
-  server.on("/off",         HTTP_GET, handleOff);
-  server.on("/status",      HTTP_GET, handleStatus);
-  server.on("/beak/open",   HTTP_GET, handleBeakOpen);
-  server.on("/beak/close",  HTTP_GET, handleBeakClose);
-  server.on("/beak/angle",  HTTP_GET, handleBeakAngle);
-  server.on("/play",        HTTP_GET, handlePlay);
-  server.on("/stop",        HTTP_GET, handleStop);
-  server.on("/clips",       HTTP_GET, handleClips);
-  server.on("/volume",      HTTP_GET, handleVolume);
-  server.on("/pitch",       HTTP_GET, handlePitch);
-  server.on("/restart",     HTTP_GET, handleRestart);
-  server.on("/netinfo",     HTTP_GET, handleNetInfo);
-  server.onNotFound(handleNotFound);
-  server.begin();
-  Serial.println("HTTP server started on port 80");
+  if (startParrotHttps() != ESP_OK) {
+    Serial.println("FATAL: HTTPS server failed to start (check cert.pem + key.pem on LittleFS)");
+    while (true) delay(3000);
+  }
+  Serial.println("HTTPS server on port 443 (WSS path /ws)");
 
-  webSocket.begin();
-  webSocket.onEvent(webSocketEvent);
-  Serial.println("WebSocket server started on port 81 (small BIN echo; >=64 B = 16 kHz mono PCM to I2S)");
-
-  Serial.println("Join WiFi 'parrotpi-test', then visit http://192.168.4.1/");
+  Serial.println("Join WiFi 'parrotpi-test', then open https://192.168.4.1/ (accept cert warning)");
 
   // ----- Startup self-test -----
   // Play the bundled test.wav and chatter the beak so you can confirm
@@ -581,8 +370,7 @@ void setup() {
   }
 }
 void loop() {
-  server.handleClient();
-  webSocket.loop();
+  // httpd runs on its own tasks; no server.handleClient() needed.
 
   // Drive the beak animation (no-op if not active).
   beakAnim.update();
