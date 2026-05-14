@@ -37,8 +37,9 @@
 #include <AudioGeneratorWAV.h>             //   (all <AudioXxx.h> headers come from the ESP8266Audio package)
 #include <AudioOutputI2S.h>               //
 
-const char* VERSION = "0.2d";
+const char* VERSION = "0.2e";
 // d- can send tone from browser to parrot
+// e - added pub/private key in anticipation of https
 
 
 // ----- WiFi Access Point -----
@@ -517,6 +518,17 @@ void setup() {
     Serial.println("ERROR: LittleFS.begin() failed - audio clips unavailable");
   } else {
     Serial.println("LittleFS mounted");
+    Serial.println("[TLS] checking /cert.pem and /key.pem on LittleFS...");
+    if (LittleFS.exists("/cert.pem") && LittleFS.exists("/key.pem")) {
+      File fc = LittleFS.open("/cert.pem", "r");
+      File fk = LittleFS.open("/key.pem", "r");
+      Serial.printf("TLS files on flash: cert.pem=%u B, key.pem=%u B (next: HTTPS server)\n",
+                    (unsigned)(fc ? fc.size() : 0), (unsigned)(fk ? fk.size() : 0));
+      if (fc) fc.close();
+      if (fk) fk.close();
+    } else {
+      Serial.println("WARN: /cert.pem or /key.pem missing — add both to data/ and upload LittleFS before HTTPS");
+    }
   }
 
   // I2S audio output (persistent; reused across clips)
