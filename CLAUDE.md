@@ -25,6 +25,49 @@ You'll need
 - Also under the directory is a subdirectory, `data`, containing supporting files:
   - *.wav These are pre-recorded phrases that the parrot can be commanded to play back
   - index.html This is the web page
+  - You will also need to create YOUR OWN private/public key pair in this directory (see Public/Private Key Creation section below)
+
+### Public/Private Key Creation
+The project's walkie-talkie feature requires that the browser has permission to use the microphone of the client (e.g. the micropohone of a cell phone), and that requires that the page be served over HTTPS.  Therefore we need to provide a valid or at least self-signed public/private key for the HTTPS/TLS protocol.  So you must create a public and private key for the project.  You can follow these basic steps to do this.  This example assumes using gitbash terminal on a Windows.
+```
+1. Open bash/gitbash terminal
+mkdir ~/parrot-certs
+cd ~/parrot-certs
+
+2. vi openssl-san.cnf
+
+3. Paste in the following into the new file and save:
+[req]
+default_bits = 2048
+prompt = no
+default_md = sha256
+x509_extensions = v3_req
+distinguished_name = dn
+
+[dn]
+C = US
+ST = Colorado
+L = Colorado Springs
+O = ParrotESP
+OU = Development
+CN = 192.168.4.1
+
+[v3_req]
+subjectAltName = @alt_names
+
+[alt_names]
+IP.1 = 192.168.4.1
+
+4. Run:
+ openssl req -x509 -nodes -days 10000 \
+-newkey rsa:2048 \
+-keyout key.pem \
+-out cert.pem \
+-config openssl-san.cnf
+
+5. Copy the cert.pem and key.pem files to the directory:
+esp32_parrot_full/data
+
 
 ## Hardware
 - ESP32 
