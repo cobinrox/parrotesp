@@ -15,8 +15,12 @@
 //   GET /restart                        - reboot the ESP32
 //   GET /netinfo                        - network/device info (JSON)
 //
-// WebSocket (port 81, parallel to HTTP 80 — bring-up: echoes TEXT + BINARY):
+// WebSocket (port 81, parallel to HTTP 80):
 //   ws://<AP_IP>:81/
+//   - Small TEXT / small BINARY frames: echoed (bring-up test).
+//   - Larger BINARY frames (walkie PCM): 16-bit little-endian mono @ 16 kHz,
+//     pushed to I2S via audioOut (library applies current SetGain volume).
+//     Ignored while a WAV clip is playing so the decoder keeps the I2S clock.
 //
 // Beak animator is a standalone module: any audio source (file playback
 // today, live walkie-talkie mic stream tomorrow) just calls
@@ -32,6 +36,10 @@
 #include <AudioFileSourceLittleFS.h>      // EXTERNAL: install "ESP8266Audio by Earle F. Philhower, III"
 #include <AudioGeneratorWAV.h>             //   (all <AudioXxx.h> headers come from the ESP8266Audio package)
 #include <AudioOutputI2S.h>               //
+
+const char* VERSION = "0.2d";
+// d- can send tone from browser to parrot
+
 
 // ----- WiFi Access Point -----
 const char* AP_SSID     = "parrotpi-test";
@@ -72,30 +80,6 @@ public:
 
 // ----- Web server -----
 WebServer server(80);
-
-// WebSocket server (same WiFi AP; different port — no Async TCP stack needed)
-WebSocketsServer webSocket(81);
-
-void webSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
-  switch (type) {
-    case WStype_DISCONNECTED:
-      Serial.printf("[WS %u] disconnect\n", num);
-      break;
-    case WStype_CONNECTED: {
-      IPAddress ip = webSocket.remoteIP(num);
-      Serial.printf("[WS %u] connect from %s\n", num, ip.toString().c_str());
-      break;
-    }
-    case WStype_TEXT:
-      webSocket.sendTXT(num, payload, length);
-      break;
-    case WStype_BIN:
-      webSocket.sendBIN(num, payload, length);
-      break;
-    default:
-      break;
-  }
-}
 
 // ----- Forward declaration so BeakAnimator can use setBeakAngle() -----
 void setBeakAngle(int deg);
@@ -163,6 +147,51 @@ AudioGeneratorWAV       *audioWav  = nullptr;
 PitchAudioOutputI2S     *audioOut  = nullptr;  // persistent; reused per clip
 String                   currentClip = "";
 
+// WebSocket server (port 81; needs audioOut for PCM path — declared after I2S pointer)
+static void resetWsPcmStreamState();
+static void feedWsPcmToI2s(const uint8_t* payload, size_t length);
+
+static const int kWsPcmSampleRateHz = 16000;
+static bool g_wsPcmRatePrimed = false;
+
+WebSocketsServer webSocket(81);
+
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_DISCONNECTED:
+      Serial.printf("[WS %u] disconnect\n", num);
+      // If I2S was left running from PCM, DMA underruns sound like repeated clicks.
+      // flush() must only run while the channel is active (ConsumeSample is a no-op otherwise).
+      if (audioOut && g_wsPcmRatePrimed) {
+        audioOut->flush();
+        audioOut->stop();
+      }
+      resetWsPcmStreamState();
+      break;
+    case WStype_CONNECTED: {
+      IPAddress ip = webSocket.remoteIP(num);
+      Serial.printf("[WS %u] connect from %s\n", num, ip.toString().c_str());
+      break;
+    }
+    case WStype_TEXT:
+      webSocket.sendTXT(num, payload, length);
+      break;
+    case WStype_BIN: {
+      // Tiny binary frames keep the step-1 echo test working; larger chunks
+      // are treated as live mono PCM (browser worklet will use >=64 bytes).
+      static const size_t kWsPcmMinBytes = 64;
+      if (length >= kWsPcmMinBytes && (length & 1u) == 0) {
+        feedWsPcmToI2s(payload, length);
+      } else {
+        webSocket.sendBIN(num, payload, length);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
 // ----- LED helper -----
 void setLed(bool on) {
   ledOn = on;
@@ -195,6 +224,72 @@ void stopPlayback() {
     beakAnim.stop();
   }
   currentClip = "";
+  resetWsPcmStreamState();
+  // PCM path leaves I2S running without a WAV generator; stop the driver so DMA does not underrun.
+  if (audioOut) audioOut->stop();
+}
+
+// ----- WebSocket PCM → I2S (step 3): 16 kHz mono int16 LE, volume via SetGain -----
+
+static void resetWsPcmStreamState() {
+  g_wsPcmRatePrimed = false;
+}
+
+static void feedWsPcmToI2s(const uint8_t* payload, size_t length) {
+  if (!audioOut || length < 2) return;
+  if (audioWav && audioWav->isRunning()) {
+    static uint32_t s_lastDropLog;
+    uint32_t now = millis();
+    if (now - s_lastDropLog > 2000) {
+      s_lastDropLog = now;
+      Serial.println("[WS] PCM dropped while WAV clip is playing (/stop or wait for end)");
+    }
+    return;
+  }
+
+  if (!g_wsPcmRatePrimed) {
+    audioOut->stop();                          // drop leftover WAV-era I2S state
+    audioOut->pitchMultiplier = 1.0f;          // PCM path has no pitch shift
+    audioOut->SetRate(kWsPcmSampleRateHz);
+    // I2S is 16-bit fixed in this library — no SetBitsPerSample API.
+    audioOut->SetChannels(1);                  // we're handing it 1 ch of int16
+    audioOut->SetOutputModeMono(true);         // MAX98357A is mono
+    audioOut->SetGain(audioVolume);
+    if (!audioOut->begin()) {
+      Serial.println("[WS] audioOut->begin() failed");
+      return;
+    }
+    Serial.printf("[WS] PCM primed: 16 kHz mono int16 (first frame %u B)\n",
+                  (unsigned)length);
+    g_wsPcmRatePrimed = true;
+  }
+
+  const int16_t* samples = reinterpret_cast<const int16_t*>(payload);
+  const size_t n = length / sizeof(int16_t);
+  int16_t frame[2];
+  Serial.printf("[WS] PCM chunk %u B (%u samples)\n",
+                (unsigned)length, (unsigned)n);
+  for (size_t i = 0; i < n; i++) {
+    int16_t s = samples[i];
+    frame[0] = s;
+    frame[1] = s;
+    // ESP32 I2S uses non-blocking writes; ConsumeSample returns false when DMA is full.
+    // AudioGeneratorWAV retries in loop() — we must spin/yield here for the same reason.
+    unsigned spin = 0;
+    while (!audioOut->ConsumeSample(frame)) {
+      yield();
+      if (++spin > 20000) break;   // avoid wedging if I2S never accepts
+    }
+    if ((i & 0xff) == 0) yield();
+  }
+
+  // Without this, I2S TX keeps clocking with an empty DMA ring → repeated clicks until
+  // something else (e.g. WAV loop) feeds samples again. flush drains silence, stop powers down.
+  if (audioOut) {
+    audioOut->flush();
+    audioOut->stop();
+  }
+  resetWsPcmStreamState();
 }
 
 bool startPlayback(const String &clipName) {
@@ -403,8 +498,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println("=== ParrotPi (ESP32) v0.1 starting ===");
-
+  Serial.printf("=== ParrotPi (ESP32) v%s starting ===\n", VERSION);
   // LED
   pinMode(LED_PIN, OUTPUT);
   setLed(false);
@@ -461,7 +555,7 @@ void setup() {
 
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
-  Serial.println("WebSocket server started on port 81 (echo test)");
+  Serial.println("WebSocket server started on port 81 (small BIN echo; >=64 B = 16 kHz mono PCM to I2S)");
 
   Serial.println("Join WiFi 'parrotpi-test', then visit http://192.168.4.1/");
 
