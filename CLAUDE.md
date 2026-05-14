@@ -96,5 +96,6 @@ esp32_parrot_full/data
 2. Put the .wav files under the ./data directory of the parrotesp folder.
 3. (Important) Turn off the serial monitor window/view
 4. Set the file upload speed to the 115K option
-4. Hold down the BOOT switch on the ESP and, while still holding that down, press the EN switch on the ESP, then let up the BOOT switch
+
 4. Use the "littlefs" command up upload the files to the ESP.  Use ctrl-sh-P, choose littlefs, then the Upload option.
+5. When "COnnecting..." shows on the console, click the BOOT button on the ESP and hold until it shows that files are being uploaded

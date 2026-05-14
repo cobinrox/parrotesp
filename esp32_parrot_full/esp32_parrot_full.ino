@@ -22,14 +22,17 @@
 //     pushed to I2S via audioOut (library applies current SetGain volume).
 //     Ignored while a WAV clip is playing so the decoder keeps the I2S clock.
 //
-// Beak animator is a standalone module: any audio source (file playback
-// today, live walkie-talkie mic stream tomorrow) just calls
-// beakAnim.start() at the beginning and beakAnim.stop() at the end.
+// Beak animator is a standalone module: file playback and live walkie PCM
+// call beakAnim.start() at the beginning and beakAnim.stop() at the end.
 // While it is active, manual /beak/* endpoints are rejected with HTTP 409.
 // ===================================================================
 
 #include <WiFi.h>                         // built-in (ESP32 board package)
 #include <LittleFS.h>                     // built-in (filesystem)
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include <string.h>
 #include "esp_http_server.h"
 #include "esp_https_server.h"
 #include "esp_log.h"
@@ -38,9 +41,11 @@
 #include <AudioGeneratorWAV.h>             //   (all <AudioXxx.h> headers come from the ESP8266Audio package)
 #include <AudioOutputI2S.h>               //
 
-const char* VERSION = "0.3";
+const char* VERSION = "0.6";
 // 0.3 — HTTPS :443 (esp_https_server) + WSS /ws (httpd WebSocket). Plain HTTP/WebSockets removed.
-
+// 0.4 — Live walkie-talkie PCM stream support.
+// 0.5 — WS PCM queued off httpd task; mutex + generation to avoid post-close I2S feed.
+// 0.6 — Tee walkie stream to /last_recording.wav + WAV header patch on disconnect.
 
 // ----- WiFi Access Point -----
 const char* AP_SSID     = "parrotpi-test";
@@ -153,10 +158,14 @@ static char *g_cert_pem = nullptr;
 static char *g_key_pem  = nullptr;
 
 static void resetWsPcmStreamState();
-static void feedWsPcmToI2s(const uint8_t* payload, size_t length);
+static void feedWsPcmToI2s(const uint8_t* payload, size_t length, uint32_t msgGen);
+
+uint32_t g_wsConnectGeneration = 0;
 
 static const int kWsPcmSampleRateHz = 16000;
 static bool g_wsPcmRatePrimed = false;
+// Last WSS client IPv4 (set on WS HTTP_GET handshake; cleared on disconnect).
+String g_wsTalkerIp = "";
 
 // ----- LED helper -----
 void setLed(bool on) {
@@ -190,9 +199,11 @@ void stopPlayback() {
     beakAnim.stop();
   }
   currentClip = "";
-  resetWsPcmStreamState();
-  // PCM path leaves I2S running without a WAV generator; stop the driver so DMA does not underrun.
-  if (audioOut) audioOut->stop();
+  // Live walkie PCM owns I2S while g_wsPcmRatePrimed — do not stop/reset here or the stream dies.
+  if (!g_wsPcmRatePrimed) {
+    resetWsPcmStreamState();
+    if (audioOut) audioOut->stop();
+  }
 }
 
 // ----- WebSocket PCM → I2S (step 3): 16 kHz mono int16 LE, volume via SetGain -----
@@ -201,8 +212,110 @@ static void resetWsPcmStreamState() {
   g_wsPcmRatePrimed = false;
 }
 
-static void feedWsPcmToI2s(const uint8_t* payload, size_t length) {
+// ----- Tee walkie PCM to /last_recording.wav (16 kHz mono S16 LE; patch sizes on close) -----
+static File g_lastRecFile;
+static uint32_t g_lastRecPcmBytes = 0;
+static bool g_lastRecWriterOpen = false;
+
+static void putLe16(uint8_t* d, uint16_t v) {
+  d[0] = (uint8_t)(v & 0xff);
+  d[1] = (uint8_t)((v >> 8) & 0xff);
+}
+static void putLe32(uint8_t* d, uint32_t v) {
+  d[0] = (uint8_t)(v & 0xff);
+  d[1] = (uint8_t)((v >> 8) & 0xff);
+  d[2] = (uint8_t)((v >> 16) & 0xff);
+  d[3] = (uint8_t)((v >> 24) & 0xff);
+}
+
+static void lastRecAbortWriter() {
+  if (g_lastRecWriterOpen && g_lastRecFile) {
+    g_lastRecFile.close();
+  }
+  g_lastRecWriterOpen = false;
+  g_lastRecPcmBytes = 0;
+}
+
+static bool lastRecOpenPlaceholderWav() {
+  lastRecAbortWriter();
+  if (LittleFS.exists("/last_recording.wav")) {
+    LittleFS.remove("/last_recording.wav");
+  }
+  g_lastRecFile = LittleFS.open("/last_recording.wav", "w");
+  if (!g_lastRecFile) {
+    Serial.println("[last_rec] open /last_recording.wav for write failed");
+    return false;
+  }
+  uint8_t hdr[44];
+  memcpy(hdr, "RIFF", 4);
+  putLe32(hdr + 4, 36);   // fileSize - 8 for empty data (placeholder)
+  memcpy(hdr + 8, "WAVE", 4);
+  memcpy(hdr + 12, "fmt ", 4);
+  putLe32(hdr + 16, 16);
+  putLe16(hdr + 20, 1);
+  putLe16(hdr + 22, 1);
+  putLe32(hdr + 24, (uint32_t)kWsPcmSampleRateHz);
+  putLe32(hdr + 28, (uint32_t)kWsPcmSampleRateHz * 2u);
+  putLe16(hdr + 32, 2);
+  putLe16(hdr + 34, 16);
+  memcpy(hdr + 36, "data", 4);
+  putLe32(hdr + 40, 0);
+  if (g_lastRecFile.write(hdr, sizeof(hdr)) != sizeof(hdr)) {
+    Serial.println("[last_rec] header write failed");
+    g_lastRecFile.close();
+    g_lastRecWriterOpen = false;
+    LittleFS.remove("/last_recording.wav");
+    return false;
+  }
+  g_lastRecPcmBytes = 0;
+  g_lastRecWriterOpen = true;
+  Serial.println("[last_rec] capturing to /last_recording.wav");
+  return true;
+}
+
+static void lastRecAppendPcm(const uint8_t* p, size_t n) {
+  if (!g_lastRecWriterOpen || !g_lastRecFile || !p || n == 0) return;
+  size_t w = g_lastRecFile.write(p, n);
+  g_lastRecPcmBytes += w;
+}
+
+void lastRecCloseAndPatch() {
+  if (!g_lastRecWriterOpen || !g_lastRecFile) {
+    return;
+  }
+  g_lastRecFile.flush();
+  g_lastRecFile.close();
+  g_lastRecWriterOpen = false;
+  uint32_t dataSz = g_lastRecPcmBytes;
+  g_lastRecPcmBytes = 0;
+  if (dataSz == 0) {
+    LittleFS.remove("/last_recording.wav");
+    Serial.println("[last_rec] removed empty capture");
+    return;
+  }
+  File f = LittleFS.open("/last_recording.wav", "r+");
+  if (!f) {
+    Serial.println("[last_rec] patch: reopen failed");
+    return;
+  }
+  uint32_t riffSz = 36 + dataSz;
+  uint8_t u[4];
+  putLe32(u, riffSz);
+  f.seek(4, SeekSet);
+  f.write(u, 4);
+  putLe32(u, dataSz);
+  f.seek(40, SeekSet);
+  f.write(u, 4);
+  f.close();
+  Serial.printf("[last_rec] finalized: %u bytes PCM (~%.2f s)\n", (unsigned)dataSz,
+                (double)dataSz / (2.0 * (double)kWsPcmSampleRateHz));
+}
+
+static void feedWsPcmToI2s(const uint8_t* payload, size_t length, uint32_t msgGen) {
   if (!audioOut || length < 2) return;
+  if (msgGen != g_wsConnectGeneration) {
+    return;
+  }
   if (audioWav && audioWav->isRunning()) {
     static uint32_t s_lastDropLog;
     uint32_t now = millis();
@@ -228,13 +341,20 @@ static void feedWsPcmToI2s(const uint8_t* payload, size_t length) {
     Serial.printf("[WS] PCM primed: 16 kHz mono int16 (first frame %u B)\n",
                   (unsigned)length);
     g_wsPcmRatePrimed = true;
+    beakAnim.start("mic");
+    lastRecOpenPlaceholderWav();
   }
 
   const int16_t* samples = reinterpret_cast<const int16_t*>(payload);
   const size_t n = length / sizeof(int16_t);
   int16_t frame[2];
-  Serial.printf("[WS] PCM chunk %u B (%u samples)\n",
-                (unsigned)length, (unsigned)n);
+  static uint32_t s_lastChunkLogMs;
+  uint32_t nowMs = millis();
+  if (nowMs - s_lastChunkLogMs > 500u) {
+    s_lastChunkLogMs = nowMs;
+    Serial.printf("[WS] PCM chunk %u B (%u samples)\n",
+                  (unsigned)length, (unsigned)n);
+  }
   for (size_t i = 0; i < n; i++) {
     int16_t s = samples[i];
     frame[0] = s;
@@ -248,17 +368,60 @@ static void feedWsPcmToI2s(const uint8_t* payload, size_t length) {
     }
     if ((i & 0xff) == 0) yield();
   }
-
-  // Without this, I2S TX keeps clocking with an empty DMA ring → repeated clicks until
-  // something else (e.g. WAV loop) feeds samples again. flush drains silence, stop powers down.
-  if (audioOut) {
-    audioOut->flush();
-    audioOut->stop();
+  if (msgGen == g_wsConnectGeneration) {
+    lastRecAppendPcm(payload, length);
   }
-  resetWsPcmStreamState();
+  // Keep I2S fed for the duration of the WebSocket session; flush/stop happens in
+  // ws_pcm_disconnect_cleanup() when the client disconnects.
+}
+
+// ----- WS PCM queue (httpd task must not block on I2S ConsumeSample) -----
+typedef struct {
+  uint8_t *payload;
+  size_t len;
+  uint32_t gen;
+} WsPcmQueueMsg;
+
+QueueHandle_t g_wsPcmQ = nullptr;
+SemaphoreHandle_t g_walkieAudioMux = nullptr;
+
+void wsPcmQueueInit() {
+  if (!g_walkieAudioMux) {
+    g_walkieAudioMux = xSemaphoreCreateMutex();
+  }
+  if (g_wsPcmQ) return;
+  g_wsPcmQ = xQueueCreate(16, sizeof(WsPcmQueueMsg));
+  if (!g_wsPcmQ) {
+    Serial.println("[WS] ERROR: PCM queue create failed (walkie may drop frames)");
+  }
+}
+
+void wsPcmDiscardQueued() {
+  if (!g_wsPcmQ) return;
+  WsPcmQueueMsg msg;
+  while (xQueueReceive(g_wsPcmQ, &msg, 0) == pdTRUE) {
+    free(msg.payload);
+  }
+}
+
+void drainWsPcmQueue() {
+  if (!g_wsPcmQ || !g_walkieAudioMux) return;
+  if (xSemaphoreTake(g_walkieAudioMux, 0) != pdTRUE) {
+    return;
+  }
+  WsPcmQueueMsg msg;
+  while (xQueueReceive(g_wsPcmQ, &msg, 0) == pdTRUE) {
+    feedWsPcmToI2s(msg.payload, msg.len, msg.gen);
+    free(msg.payload);
+  }
+  xSemaphoreGive(g_walkieAudioMux);
 }
 
 bool startPlayback(const String &clipName) {
+  if (g_wsPcmRatePrimed) {
+    Serial.println("[play] refused: walkie PCM stream active");
+    return false;
+  }
   stopPlayback();
 
   String path = "/" + clipName + ".wav";
@@ -352,6 +515,8 @@ void setup() {
   }
   Serial.print("AP IP: "); Serial.println(WiFi.softAPIP());
 
+  wsPcmQueueInit();
+
   if (startParrotHttps() != ESP_OK) {
     Serial.println("FATAL: HTTPS server failed to start (check cert.pem + key.pem on LittleFS)");
     while (true) delay(3000);
@@ -374,6 +539,9 @@ void loop() {
 
   // Drive the beak animation (no-op if not active).
   beakAnim.update();
+
+  // Drain walkie PCM queued from the httpd WebSocket task (must not block there on I2S).
+  drainWsPcmQueue();
 
   // Pump audio samples to I2S while a clip is playing.
   if (audioWav && audioWav->isRunning()) {

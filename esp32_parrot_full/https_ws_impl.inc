@@ -1,5 +1,10 @@
 // ---- Included from esp32_parrot_full.ino after startPlayback() ----
 #include <stdlib.h>
+#include "lwip/sockets.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
+void lastRecCloseAndPatch(void);
 
 // HTTPS (esp_https_server) + WebSocket (/ws) helpers and URI handlers.
 
@@ -111,6 +116,8 @@ static esp_err_t uri_status(httpd_req_t *req) {
   body += "\"beak_owner\":\""; body += beakAnim.owner;               body += "\",";
   body += "\"volume\":";      body += String(audioVolume, 2);        body += ",";
   body += "\"pitch\":";       body += String(audioPitch, 2);         body += ",";
+  body += "\"streaming\":";   body += (g_wsPcmRatePrimed ? "true" : "false"); body += ",";
+  body += "\"talker_ip\":\""; body += g_wsTalkerIp;                 body += "\",";
   body += "\"playing\":\"";   body += currentClip;                   body += "\"";
   body += "}";
   return send_json(req, 200, body);
@@ -139,6 +146,9 @@ static esp_err_t uri_beak_angle(httpd_req_t *req) {
 }
 
 static esp_err_t uri_play(httpd_req_t *req) {
+  if (g_wsPcmRatePrimed) {
+    return send_json(req, 409, String("{\"error\":\"walkie_stream_active\"}"));
+  }
   char clip[64];
   if (!get_query_param(req, "clip", clip, sizeof(clip)))
     return send_json(req, 400, String("{\"error\":\"missing ?clip=NAME\"}"));
@@ -195,6 +205,9 @@ static esp_err_t uri_pitch(httpd_req_t *req) {
   char ps[24];
   if (!get_query_param(req, "p", ps, sizeof(ps)))
     return send_json(req, 400, String("{\"error\":\"missing ?p=N\"}"));
+  if (g_wsPcmRatePrimed) {
+    return send_json(req, 409, String("{\"error\":\"walkie_stream_active\"}"));
+  }
   float p = String(ps).toFloat();
   if (p < 0.5f) p = 0.5f;
   if (p > 2.0f) p = 2.0f;
@@ -215,16 +228,54 @@ static esp_err_t uri_restart(httpd_req_t *req) {
 }
 
 static void ws_pcm_disconnect_cleanup() {
-  if (audioOut && g_wsPcmRatePrimed) {
-    audioOut->flush();
-    audioOut->stop();
+  bool locked = false;
+  if (g_walkieAudioMux) {
+    if (xSemaphoreTake(g_walkieAudioMux, pdMS_TO_TICKS(2000)) == pdTRUE) {
+      locked = true;
+    } else {
+      Serial.println("[WS] cleanup: walkie mutex timeout");
+    }
   }
+  g_wsConnectGeneration++;
+  wsPcmDiscardQueued();
+  lastRecCloseAndPatch();
+  const bool hadWalkie = g_wsPcmRatePrimed;
+  if (hadWalkie) {
+    beakAnim.stop();
+    if (audioOut) {
+      audioOut->flush();
+      audioOut->stop();
+    }
+  }
+  g_wsTalkerIp = "";
   resetWsPcmStreamState();
+  if (locked) {
+    xSemaphoreGive(g_walkieAudioMux);
+  }
 }
 
 static esp_err_t parrot_ws_handler(httpd_req_t *req) {
   if (req->method == HTTP_GET) {
-    Serial.printf("[WSS] connect fd=%d\n", httpd_req_to_sockfd(req));
+    int fd = httpd_req_to_sockfd(req);
+    struct sockaddr_in sa = {};
+    socklen_t sl = sizeof(sa);
+    if (fd >= 0 && getpeername(fd, (struct sockaddr *)&sa, &sl) == 0 &&
+        sa.sin_family == AF_INET) {
+      uint8_t *ipb = (uint8_t *)&sa.sin_addr.s_addr;
+      g_wsTalkerIp =
+          String(ipb[0]) + "." + String(ipb[1]) + "." + String(ipb[2]) + "." + String(ipb[3]);
+    } else {
+      g_wsTalkerIp = "";
+    }
+    Serial.printf("[WSS] connect fd=%d talker=%s\n", fd, g_wsTalkerIp.c_str());
+    if (g_walkieAudioMux &&
+        xSemaphoreTake(g_walkieAudioMux, pdMS_TO_TICKS(2000)) == pdTRUE) {
+      lastRecCloseAndPatch();
+      g_wsConnectGeneration++;
+      xSemaphoreGive(g_walkieAudioMux);
+    } else {
+      g_wsConnectGeneration++;
+    }
     return ESP_OK;
   }
 
@@ -269,7 +320,14 @@ static esp_err_t parrot_ws_handler(httpd_req_t *req) {
   if (pkt.type == HTTPD_WS_TYPE_BINARY) {
     static const size_t kWsPcmMinBytes = 64;
     if (pkt.len >= kWsPcmMinBytes && (pkt.len & 1u) == 0) {
-      feedWsPcmToI2s(pkt.payload, pkt.len);
+      WsPcmQueueMsg msg = {buf, pkt.len, g_wsConnectGeneration};
+      if (g_wsPcmQ && xQueueSend(g_wsPcmQ, &msg, 0) == pdTRUE) {
+        return ESP_OK; // ownership of buf transferred to loop() consumer
+      }
+      if (g_wsPcmQ) {
+        Serial.println("[WS] PCM queue full, draining synchronously");
+      }
+      feedWsPcmToI2s(pkt.payload, pkt.len, g_wsConnectGeneration);
       free(buf);
       return ESP_OK;
     }

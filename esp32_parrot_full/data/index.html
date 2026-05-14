@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>ParrotPi (ESP32) 🦜</title>
+<title>ParrotESP (v0.2) 🦜</title>
 
 <style>
   /* Reset and body */
@@ -328,7 +328,7 @@
 <body>
 
 <div style="display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; justify-content:center;">
-  <h1>🦜 ParrotPi <span style="font-size:0.6em; color:#80cbc4;">(ESP32)</span></h1>
+  <h1>🦜 ParrotESP <span style="font-size:0.6em; color:#80cbc4;">(v0.2)</span></h1>
   <div id="statusLine" style="font-size:1rem; color:#aaa;">Status: initialising…</div>
 </div>
 <div id="parrot"></div>
@@ -527,8 +527,8 @@
 
 
 <!-- ===================================================================
-     ESP32 port — NO Socket.IO, NO PCM AudioWorklet (firmware doesn't
-     stream audio yet). All controls map to GET endpoints on the ESP32.
+     ESP32: HTTPS REST + WSS /ws (echo + 16 kHz mono int16 PCM walkie).
+     Hold-to-talk uses AudioWorklet → binary frames on wss://…/ws (same path as Test WS).
      =================================================================== -->
 <script>
 "use strict";
@@ -537,8 +537,56 @@ let micStream;
 let micReady = false;
 let hardwareBusy = false;
 let micActive = false;
+let micHoldSession = 0;
+let micAudioCtx = null;
+let micWs = null;
+let micWorkletNode = null;
+let micSourceNode = null;
+let micMuteNode = null;
 const holdButton  = document.getElementById("holdButton");
 const meterWrap   = document.getElementById("meterWrap");
+const vuBar       = document.getElementById("vuBar");
+
+// AudioWorklet: resample browser rate → 16 kHz mono int16, 1024-sample binary chunks + vu RMS.
+const PARROT_MIC_WORKLET_CODE = String.raw`
+class ParrotMicDSP extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.inPos = 0;
+    this.ratio = 0;
+    this.buf = new Int16Array(1024);
+    this.bi = 0;
+  }
+  process(inputs, outputs, parameters) {
+    const input = inputs[0];
+    if (!input || !input[0]) return true;
+    const ch = input[0];
+    if (this.ratio === 0) this.ratio = sampleRate / 16000;
+    let sumSq = 0;
+    for (let q = 0; q < ch.length; q++) sumSq += ch[q] * ch[q];
+    this.port.postMessage({ t: "vu", v: Math.sqrt(sumSq / ch.length) });
+    while (this.inPos < ch.length) {
+      const i0 = this.inPos | 0;
+      const i1 = i0 + 1 < ch.length ? i0 + 1 : i0;
+      const f = this.inPos - i0;
+      const x = ch[i0] * (1 - f) + ch[i1] * f;
+      let s = x * 32767;
+      if (s > 32767) s = 32767;
+      if (s < -32768) s = -32768;
+      this.buf[this.bi++] = s | 0;
+      if (this.bi >= 1024) {
+        this.port.postMessage({ t: "pcm", b: this.buf.buffer }, [this.buf.buffer]);
+        this.buf = new Int16Array(1024);
+        this.bi = 0;
+      }
+      this.inPos += this.ratio;
+    }
+    this.inPos -= ch.length;
+    return true;
+  }
+}
+registerProcessor("parrot-mic-dsp", ParrotMicDSP);
+`;
 
 // ------------------------------------------------------------
 // Helpers
@@ -560,6 +608,17 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(h); h = setTimeout(() => fn(...args), ms); };
 }
 
+function parrotWsUrl() {
+  const wsScheme = location.protocol === "https:" ? "wss" : "ws";
+  const wsHost = location.hostname || "192.168.4.1";
+  const wsPort = location.port ? ":" + location.port : "";
+  const url = wsScheme + "://" + wsHost + wsPort + "/ws";
+  if (location.protocol === "https:" && !url.startsWith("wss:")) {
+    throw new Error("HTTPS page requires wss: WebSocket URL");
+  }
+  return url;
+}
+
 // ------------------------------------------------------------
 // WebSocket /ws — echo bring-up + PCM tone (HTTPS: wss://host/ws)
 // ------------------------------------------------------------
@@ -568,10 +627,7 @@ function testWsEcho() {
   const btn = document.getElementById("wsEchoBtn");
   btn.disabled = true;
   out.textContent = "Connecting…";
-  const wsScheme = location.protocol === "https:" ? "wss" : "ws";
-  const wsHost = location.hostname || "192.168.4.1";
-  const wsPort = location.port ? ":" + location.port : "";
-  const wsUrl = wsScheme + "://" + wsHost + wsPort + "/ws";
+  const wsUrl = parrotWsUrl();
   if (location.protocol === "https:" && !wsUrl.startsWith("wss:")) {
     out.textContent = "Internal error: expected wss: URL on HTTPS page.";
     btn.disabled = false;
@@ -644,8 +700,42 @@ function testWsEcho() {
   }, 4000);
 }
 
+function teardownMicPipeline() {
+  try {
+    if (micWs) {
+      micWs.onopen = micWs.onclose = micWs.onerror = micWs.onmessage = null;
+      if (micWs.readyState === WebSocket.OPEN || micWs.readyState === WebSocket.CONNECTING) {
+        micWs.close();
+      }
+    }
+  } catch (_) {}
+  micWs = null;
+  try {
+    if (micWorkletNode) {
+      micWorkletNode.port.onmessage = null;
+      micWorkletNode.disconnect();
+    }
+  } catch (_) {}
+  micWorkletNode = null;
+  try {
+    if (micSourceNode) micSourceNode.disconnect();
+  } catch (_) {}
+  micSourceNode = null;
+  try {
+    if (micMuteNode) micMuteNode.disconnect();
+  } catch (_) {}
+  micMuteNode = null;
+  if (micStream) {
+    try {
+      micStream.getTracks().forEach((t) => t.stop());
+    } catch (_) {}
+  }
+  micStream = null;
+}
+
 // ------------------------------------------------------------
-// Mic permission (UI placeholder; firmware doesn't stream yet)
+// Mic permission — grants getUserMedia once; tracks stop immediately
+// (Hold-to-talk opens a fresh stream on each press).
 // ------------------------------------------------------------
 async function requestMic() {
   const btn = document.getElementById("micRequestBtn");
@@ -666,24 +756,120 @@ async function requestMic() {
 }
 
 // ------------------------------------------------------------
-// Hold to Talk — UI shell only; no streaming yet.
-// When firmware gains a /ws/audio WebSocket, fill in startMic/stopMic.
+// Hold to Talk — wss://…/ws binary PCM (16 kHz mono int16 LE, ≥64 B frames).
 // ------------------------------------------------------------
-function startMic() {
+function waitForMicWsOpen(ws, session) {
+  return new Promise((resolve, reject) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      resolve();
+      return;
+    }
+    let done = false;
+    const finish = (fn) => {
+      if (done) return;
+      done = true;
+      clearTimeout(t);
+      ws.removeEventListener("open", onOpen);
+      ws.removeEventListener("error", onError);
+      ws.removeEventListener("close", onClose);
+      fn();
+    };
+    const onOpen = () => finish(() => resolve());
+    const onError = () => {
+      // Closing a CONNECTING socket fires "error"; stopMic bumps micHoldSession first — not a failure.
+      if (session !== micHoldSession) finish(() => resolve());
+      else finish(() => reject(new Error("WebSocket error")));
+    };
+    const onClose = () => {
+      if (session !== micHoldSession) finish(() => resolve());
+      else finish(() => reject(new Error("WebSocket closed before open")));
+    };
+    const t = setTimeout(() => {
+      if (session !== micHoldSession) finish(() => resolve());
+      else finish(() => reject(new Error("WebSocket open timeout")));
+    }, 12000);
+    ws.addEventListener("open", onOpen, { once: true });
+    ws.addEventListener("error", onError, { once: true });
+    ws.addEventListener("close", onClose, { once: true });
+  });
+}
+
+async function startMic() {
   if (!micReady) return;
-  micActive = true;
-  meterWrap.classList.add("visible");
-  // TODO: open WebSocket to ws://<ip>/ws/audio and stream PCM chunks
+  const session = micHoldSession;
+  teardownMicPipeline();
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (session !== micHoldSession) {
+      teardownMicPipeline();
+      return;
+    }
+    micAudioCtx = micAudioCtx || new AudioContext();
+    await micAudioCtx.resume();
+    if (session !== micHoldSession) {
+      teardownMicPipeline();
+      return;
+    }
+    // Open WSS before addModule so a slow first worklet load does not leave the socket
+    // in CONNECTING while pointerup/teardown closes it (would look like a bogus failure).
+    const wsUrl = parrotWsUrl();
+    micWs = new WebSocket(wsUrl);
+    micWs.binaryType = "arraybuffer";
+    await waitForMicWsOpen(micWs, session);
+    if (session !== micHoldSession) {
+      teardownMicPipeline();
+      return;
+    }
+
+    const blob = new Blob([PARROT_MIC_WORKLET_CODE], { type: "application/javascript" });
+    const modUrl = URL.createObjectURL(blob);
+    await micAudioCtx.audioWorklet.addModule(modUrl);
+    URL.revokeObjectURL(modUrl);
+    if (session !== micHoldSession) {
+      teardownMicPipeline();
+      return;
+    }
+    micWorkletNode = new AudioWorkletNode(micAudioCtx, "parrot-mic-dsp");
+    micWorkletNode.port.onmessage = (ev) => {
+      if (session !== micHoldSession || !micWs || micWs.readyState !== WebSocket.OPEN) return;
+      const d = ev.data;
+      if (!d || typeof d !== "object") return;
+      if (d.t === "pcm" && d.b) {
+        micWs.send(d.b);
+      } else if (d.t === "vu" && typeof d.v === "number") {
+        const pct = Math.min(100, Math.round(d.v * 420));
+        vuBar.style.width = pct + "%";
+      }
+    };
+
+    micSourceNode = micAudioCtx.createMediaStreamSource(micStream);
+    micMuteNode = micAudioCtx.createGain();
+    micMuteNode.gain.value = 0;
+    micSourceNode.connect(micWorkletNode);
+    micWorkletNode.connect(micMuteNode);
+    micMuteNode.connect(micAudioCtx.destination);
+
+    micActive = true;
+    meterWrap.classList.add("visible");
+  } catch (err) {
+    console.error("startMic failed:", err);
+    teardownMicPipeline();
+    micActive = false;
+    holdButton.classList.remove("active");
+    holdButton.style.background = `radial-gradient(circle at 40% 35%, #4caf50, #1b5e20)`;
+    meterWrap.classList.remove("visible");
+    vuBar.style.width = "0%";
+  }
 }
 
 function stopMic() {
-  if (!micActive) return;
+  micHoldSession++;
   micActive = false;
   holdButton.classList.remove("active");
   holdButton.style.background = `radial-gradient(circle at 40% 35%, #4caf50, #1b5e20)`;
   meterWrap.classList.remove("visible");
-  document.getElementById("vuBar").style.width = "0%";
-  // TODO: close WebSocket; firmware will save received audio as last_recording.wav
+  vuBar.style.width = "0%";
+  teardownMicPipeline();
 }
 
 // ------------------------------------------------------------
@@ -691,10 +877,10 @@ function stopMic() {
 // ------------------------------------------------------------
 function initUI() {
   holdButton.addEventListener("pointerdown", (e) => {
-    if (holdButton.disabled) return;
+    if (holdButton.disabled || !micReady) return;
     holdButton.setPointerCapture(e.pointerId);
     holdButton.classList.add("active");
-    startMic();
+    startMic().catch((err) => console.error(err));
   });
   holdButton.addEventListener("pointerup",     stopMic);
   holdButton.addEventListener("pointercancel", stopMic);
@@ -817,8 +1003,10 @@ function setHardwareStatus(busy, reason) {
 async function refreshHardwareStatus() {
   try {
     const s = await api("/status");
-    const busy = !!(s.playing && s.playing.length > 0);
-    const reason = busy ? "audio" : "idle";
+    const streaming = !!s.streaming;
+    const playing = s.playing && String(s.playing).trim().length > 0;
+    const busy = streaming || playing;
+    const reason = streaming ? "mic" : (playing ? "audio" : "idle");
     setHardwareStatus(busy, reason);
 
     // Reflect firmware-side volume/pitch in the UI, unless user is touching a slider
