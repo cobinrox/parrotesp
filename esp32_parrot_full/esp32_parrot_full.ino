@@ -15,6 +15,9 @@
 //   GET /restart                        - reboot the ESP32
 //   GET /netinfo                        - network/device info (JSON)
 //
+// WebSocket (port 81, parallel to HTTP 80 — bring-up: echoes TEXT + BINARY):
+//   ws://<AP_IP>:81/
+//
 // Beak animator is a standalone module: any audio source (file playback
 // today, live walkie-talkie mic stream tomorrow) just calls
 // beakAnim.start() at the beginning and beakAnim.stop() at the end.
@@ -23,6 +26,7 @@
 
 #include <WiFi.h>                         // built-in (ESP32 board package)
 #include <WebServer.h>                    // built-in
+#include <WebSocketsServer.h>             // EXTERNAL: "WebSockets" by Markus Sattler (WebSocketsServer)
 #include <LittleFS.h>                     // built-in (filesystem)
 #include <ESP32Servo.h>                   // EXTERNAL: install "ESP32Servo by Kevin Harrington, John K. Bennett"
 #include <AudioFileSourceLittleFS.h>      // EXTERNAL: install "ESP8266Audio by Earle F. Philhower, III"
@@ -41,8 +45,8 @@ const int I2S_LRC   = 26;
 const int I2S_DOUT  = 25;
 
 // ----- Servo calibration -----
-const int BEAK_CLOSED_DEG = 75;
-const int BEAK_OPEN_DEG   = 30;
+const int BEAK_CLOSED_DEG = 40;
+const int BEAK_OPEN_DEG   = 15;
 
 // ----- Beak chatter timing (ms per open/close phase) -----
 const unsigned int BEAK_CHATTER_MS = 120;
@@ -68,6 +72,30 @@ public:
 
 // ----- Web server -----
 WebServer server(80);
+
+// WebSocket server (same WiFi AP; different port — no Async TCP stack needed)
+WebSocketsServer webSocket(81);
+
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_DISCONNECTED:
+      Serial.printf("[WS %u] disconnect\n", num);
+      break;
+    case WStype_CONNECTED: {
+      IPAddress ip = webSocket.remoteIP(num);
+      Serial.printf("[WS %u] connect from %s\n", num, ip.toString().c_str());
+      break;
+    }
+    case WStype_TEXT:
+      webSocket.sendTXT(num, payload, length);
+      break;
+    case WStype_BIN:
+      webSocket.sendBIN(num, payload, length);
+      break;
+    default:
+      break;
+  }
+}
 
 // ----- Forward declaration so BeakAnimator can use setBeakAngle() -----
 void setBeakAngle(int deg);
@@ -226,7 +254,8 @@ void handleNetInfo() {
   body += "\"chip\":\"ESP32-WROOM-32D\",";
   body += "\"mac\":\"";  body += WiFi.softAPmacAddress(); body += "\",";
   body += "\"heap\":";   body += ESP.getFreeHeap(); body += ",";
-  body += "\"uptime_ms\":"; body += millis();
+  body += "\"uptime_ms\":"; body += millis(); body += ",";
+  body += "\"ws_port\":81";
   body += "}";
   server.send(200, "application/json", body);
 }
@@ -374,7 +403,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println("=== ParrotPi (ESP32) starting ===");
+  Serial.println("=== ParrotPi (ESP32) v0.1 starting ===");
 
   // LED
   pinMode(LED_PIN, OUTPUT);
@@ -429,6 +458,11 @@ void setup() {
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.println("HTTP server started on port 80");
+
+  webSocket.begin();
+  webSocket.onEvent(webSocketEvent);
+  Serial.println("WebSocket server started on port 81 (echo test)");
+
   Serial.println("Join WiFi 'parrotpi-test', then visit http://192.168.4.1/");
 
   // ----- Startup self-test -----
@@ -442,6 +476,7 @@ void setup() {
 }
 void loop() {
   server.handleClient();
+  webSocket.loop();
 
   // Drive the beak animation (no-op if not active).
   beakAnim.update();

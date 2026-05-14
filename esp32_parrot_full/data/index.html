@@ -347,13 +347,20 @@
 <div class="info-wrap">
   <button id="micRequestBtn" onclick="requestMic()">🎤 Enable Mic</button>
   <button class="info-btn" onclick="toggleTip('micTip')" type="button">i</button>
-  <div id="micTip" class="info-tip">Tap to grant microphone access. Required before you can use Hold to Talk. (Note: live streaming not yet wired into ESP32 firmware.)</div>
+  <div id="micTip" class="info-tip">Tap to grant microphone access. Required before you can use Hold to Talk. (Live PCM over WebSocket is not wired yet; use &quot;Test WS :81 echo&quot; to verify the socket path.)</div>
 </div>
 
 <div class="info-wrap">
   <button id="holdButton" class="ctrl-btn" disabled>HOLD TO<br>TALK (*)</button>
   <button class="info-btn" onclick="toggleTip('httTip')" type="button">i</button>
-  <div id="httTip" class="info-tip">Press and hold to speak — your voice will play through the parrot. Streaming over WebSocket is not yet implemented on the ESP32 port.</div>
+  <div id="httTip" class="info-tip">Press and hold to speak — your voice will play through the parrot. PCM streaming is not wired yet; use &quot;Test WS :81 echo&quot; below to verify the WebSocket port.</div>
+</div>
+
+<div class="info-wrap" style="max-width:340px; width:100%;">
+  <button type="button" class="quickBtn" id="wsEchoBtn" onclick="testWsEcho()">Test WS :81 echo</button>
+  <button class="info-btn" onclick="toggleTip('wsTip')" type="button">i</button>
+  <div id="wsTip" class="info-tip">Opens <code>ws://&lt;this-host&gt;:81/</code>, sends a short text frame and a tiny binary frame; the firmware echoes each back (step 1 bring-up).</div>
+  <pre id="wsEchoOut" style="font-size:0.72rem; color:#aed581; margin-top:8px; white-space:pre-wrap; width:100%; max-height:120px; overflow:auto; background:#12121f; padding:8px; border-radius:6px; border:1px solid #333;"></pre>
 </div>
 
 <button onclick="openReplayDialog()" class="quickBtn ctrl-btn save-replay-btn">Save / Replay</button>
@@ -548,6 +555,64 @@ async function api(path) {
 function debounce(fn, ms) {
   let h;
   return (...args) => { clearTimeout(h); h = setTimeout(() => fn(...args), ms); };
+}
+
+// ------------------------------------------------------------
+// WebSocket port 81 — echo bring-up (firmware step 1)
+// ------------------------------------------------------------
+function testWsEcho() {
+  const out = document.getElementById("wsEchoOut");
+  const btn = document.getElementById("wsEchoBtn");
+  btn.disabled = true;
+  out.textContent = "Connecting…";
+  const host = window.location.hostname || "192.168.4.1";
+  const ws = new WebSocket(`ws://${host}:81/`);
+  ws.binaryType = "arraybuffer";
+  let lines = [];
+  let recv = 0;
+  const done = () => {
+    try { ws.close(); } catch (_) {}
+    btn.disabled = false;
+  };
+  ws.onopen = () => {
+    lines.push("open");
+    ws.send("hello-parrot");
+    ws.send(new Uint8Array([1, 2, 3, 255]).buffer);
+    lines.push("sent TEXT + BIN");
+    out.textContent = lines.join("\n");
+  };
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === "string") {
+      lines.push("TEXT echo: " + JSON.stringify(ev.data));
+    } else {
+      const u = new Uint8Array(ev.data);
+      lines.push("BIN echo: [" + Array.from(u).join(", ") + "]");
+    }
+    out.textContent = lines.join("\n");
+    recv++;
+    if (recv >= 2) setTimeout(done, 200);
+  };
+  ws.onerror = () => {
+    lines.push("socket error (is firmware flashed with WebSocketsServer on :81?)");
+    out.textContent = lines.join("\n");
+    done();
+  };
+  ws.onclose = () => {
+    lines.push("closed");
+    out.textContent = lines.join("\n");
+    btn.disabled = false;
+  };
+  setTimeout(() => {
+    if (recv < 2 && ws.readyState === WebSocket.OPEN) {
+      lines.push("timeout — expected 2 echoes, got " + recv);
+      out.textContent = lines.join("\n");
+      done();
+    } else if (recv < 2 && ws.readyState === WebSocket.CONNECTING) {
+      lines.push("timeout — still connecting");
+      out.textContent = lines.join("\n");
+      done();
+    }
+  }, 4000);
 }
 
 // ------------------------------------------------------------
