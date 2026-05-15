@@ -5,6 +5,7 @@
 #include "freertos/semphr.h"
 
 void lastRecCloseAndPatch(void);
+void wsWalkieEndSession(const char* reason);
 
 // HTTPS (esp_https_server) + WebSocket (/ws) helpers and URI handlers.
 
@@ -205,15 +206,13 @@ static esp_err_t uri_pitch(httpd_req_t *req) {
   char ps[24];
   if (!get_query_param(req, "p", ps, sizeof(ps)))
     return send_json(req, 400, String("{\"error\":\"missing ?p=N\"}"));
-  if (g_wsPcmRatePrimed) {
-    return send_json(req, 409, String("{\"error\":\"walkie_stream_active\"}"));
-  }
   float p = String(ps).toFloat();
   if (p < 0.5f) p = 0.5f;
   if (p > 2.0f) p = 2.0f;
   audioPitch = p;
   Serial.print("Pitch -> "); Serial.println(audioPitch);
-  if (audioOut && audioOut->nativeHertz > 0) {
+  // Walkie uses audioPitch in wsParrotResampleInPlace only (fixed 16 kHz I2S).
+  if (audioOut && !g_wsPcmRatePrimed && audioOut->nativeHertz > 0) {
     audioOut->pitchMultiplier = audioPitch;
     audioOut->SetRate(audioOut->nativeHertz);
   }
@@ -228,30 +227,7 @@ static esp_err_t uri_restart(httpd_req_t *req) {
 }
 
 static void ws_pcm_disconnect_cleanup() {
-  bool locked = false;
-  if (g_walkieAudioMux) {
-    if (xSemaphoreTake(g_walkieAudioMux, pdMS_TO_TICKS(2000)) == pdTRUE) {
-      locked = true;
-    } else {
-      Serial.println("[WS] cleanup: walkie mutex timeout");
-    }
-  }
-  g_wsConnectGeneration++;
-  wsPcmDiscardQueued();
-  lastRecCloseAndPatch();
-  const bool hadWalkie = g_wsPcmRatePrimed;
-  if (hadWalkie) {
-    beakAnim.stop();
-    if (audioOut) {
-      audioOut->flush();
-      audioOut->stop();
-    }
-  }
-  g_wsTalkerIp = "";
-  resetWsPcmStreamState();
-  if (locked) {
-    xSemaphoreGive(g_walkieAudioMux);
-  }
+  wsWalkieEndSession("wss disconnect");
 }
 
 static esp_err_t parrot_ws_handler(httpd_req_t *req) {
@@ -268,13 +244,8 @@ static esp_err_t parrot_ws_handler(httpd_req_t *req) {
       g_wsTalkerIp = "";
     }
     Serial.printf("[WSS] connect fd=%d talker=%s\n", fd, g_wsTalkerIp.c_str());
-    if (g_walkieAudioMux &&
-        xSemaphoreTake(g_walkieAudioMux, pdMS_TO_TICKS(2000)) == pdTRUE) {
-      lastRecCloseAndPatch();
-      g_wsConnectGeneration++;
-      xSemaphoreGive(g_walkieAudioMux);
-    } else {
-      g_wsConnectGeneration++;
+    if (g_wsPcmRatePrimed) {
+      wsWalkieEndSession("wss reconnect");
     }
     return ESP_OK;
   }
@@ -325,9 +296,13 @@ static esp_err_t parrot_ws_handler(httpd_req_t *req) {
         return ESP_OK; // ownership of buf transferred to loop() consumer
       }
       if (g_wsPcmQ) {
-        Serial.println("[WS] PCM queue full, draining synchronously");
+        static uint32_t s_lastDropLog;
+        uint32_t now = millis();
+        if (now - s_lastDropLog > 1000) {
+          s_lastDropLog = now;
+          Serial.println("[WS] PCM queue full, dropping chunk");
+        }
       }
-      feedWsPcmToI2s(pkt.payload, pkt.len, g_wsConnectGeneration);
       free(buf);
       return ESP_OK;
     }

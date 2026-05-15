@@ -41,11 +41,13 @@
 #include <AudioGeneratorWAV.h>             //   (all <AudioXxx.h> headers come from the ESP8266Audio package)
 #include <AudioOutputI2S.h>               //
 
-const char* VERSION = "0.6";
+const char* VERSION = "0.7.1";
 // 0.3 — HTTPS :443 (esp_https_server) + WSS /ws (httpd WebSocket). Plain HTTP/WebSockets removed.
 // 0.4 — Live walkie-talkie PCM stream support.
 // 0.5 — WS PCM queued off httpd task; mutex + generation to avoid post-close I2S feed.
 // 0.6 — Tee walkie stream to /last_recording.wav + WAV header patch on disconnect.
+// 0.7 — Walkie parrot pitch: resample for last_recording only; live path plays raw 16 kHz PCM.
+// 0.7.1 — No sync PCM on full queue; drain budget per loop; idle watchdog clears stuck streaming.
 
 // ----- WiFi Access Point -----
 const char* AP_SSID     = "parrotpi-test";
@@ -161,6 +163,7 @@ static void resetWsPcmStreamState();
 static void feedWsPcmToI2s(const uint8_t* payload, size_t length, uint32_t msgGen);
 
 uint32_t g_wsConnectGeneration = 0;
+uint32_t g_wsLastPcmMs = 0;
 
 static const int kWsPcmSampleRateHz = 16000;
 static bool g_wsPcmRatePrimed = false;
@@ -311,6 +314,56 @@ void lastRecCloseAndPatch() {
                 (double)dataSz / (2.0 * (double)kWsPcmSampleRateHz));
 }
 
+static void wsConsumeInt16Mono(int16_t s) {
+  int16_t frame[2] = {s, s};
+  unsigned spin = 0;
+  while (!audioOut->ConsumeSample(frame)) {
+    yield();
+    if (++spin > 800) break;
+  }
+}
+
+// ParrotPi-style pitch: out_len = in_len / parrot_factor, linear interp. I2S stays 16 kHz.
+static size_t wsParrotResampleInPlace(const int16_t* in, size_t nIn, int16_t* out, size_t outCap) {
+  const float pf = audioPitch;
+  if (nIn == 0 || !in || !out || outCap == 0) return 0;
+  if (pf < 1.001f || nIn < 64) {
+    size_t c = (nIn < outCap) ? nIn : outCap;
+    memcpy(out, in, c * sizeof(int16_t));
+    return c;
+  }
+  size_t outN = (size_t)((float)nIn / pf + 0.5f);
+  if (outN > outCap) outN = outCap;
+  if (outN == 0) return 0;
+  for (size_t o = 0; o < outN; o++) {
+    const float src = (float)o * pf;
+    size_t i0 = (size_t)src;
+    if (i0 >= nIn) i0 = nIn - 1;
+    const float frac = src - (float)i0;
+    const size_t i1 = (i0 + 1 < nIn) ? i0 + 1 : i0;
+    float v = (float)in[i0] * (1.0f - frac) + (float)in[i1] * frac;
+    if (v > 32767.0f) v = 32767.0f;
+    if (v < -32768.0f) v = -32768.0f;
+    out[o] = (int16_t)v;
+  }
+  return outN;
+}
+
+// Live: raw PCM at 16 kHz (fast, keeps realtime). File: parrot-pitched resample only.
+static void wsPlayWalkieChunk(const int16_t* in, size_t nIn, uint32_t msgGen) {
+  if (nIn > 1024) nIn = 1024;
+  for (size_t i = 0; i < nIn; i++) {
+    if (msgGen != g_wsConnectGeneration) return;
+    wsConsumeInt16Mono(in[i]);
+    if ((i & 0xff) == 0) yield();
+  }
+  int16_t pitched[1024];
+  const size_t outN = wsParrotResampleInPlace(in, nIn, pitched, 1024);
+  if (msgGen == g_wsConnectGeneration && outN > 0) {
+    lastRecAppendPcm(reinterpret_cast<const uint8_t*>(pitched), outN * sizeof(int16_t));
+  }
+}
+
 static void feedWsPcmToI2s(const uint8_t* payload, size_t length, uint32_t msgGen) {
   if (!audioOut || length < 2) return;
   if (msgGen != g_wsConnectGeneration) {
@@ -338,8 +391,8 @@ static void feedWsPcmToI2s(const uint8_t* payload, size_t length, uint32_t msgGe
       Serial.println("[WS] audioOut->begin() failed");
       return;
     }
-    Serial.printf("[WS] PCM primed: 16 kHz mono int16 (first frame %u B)\n",
-                  (unsigned)length);
+    Serial.printf("[WS] PCM primed: 16 kHz mono (parrot x%.2f, frame %u B)\n",
+                  audioPitch, (unsigned)length);
     g_wsPcmRatePrimed = true;
     beakAnim.start("mic");
     lastRecOpenPlaceholderWav();
@@ -347,7 +400,6 @@ static void feedWsPcmToI2s(const uint8_t* payload, size_t length, uint32_t msgGe
 
   const int16_t* samples = reinterpret_cast<const int16_t*>(payload);
   const size_t n = length / sizeof(int16_t);
-  int16_t frame[2];
   static uint32_t s_lastChunkLogMs;
   uint32_t nowMs = millis();
   if (nowMs - s_lastChunkLogMs > 500u) {
@@ -355,24 +407,9 @@ static void feedWsPcmToI2s(const uint8_t* payload, size_t length, uint32_t msgGe
     Serial.printf("[WS] PCM chunk %u B (%u samples)\n",
                   (unsigned)length, (unsigned)n);
   }
-  for (size_t i = 0; i < n; i++) {
-    int16_t s = samples[i];
-    frame[0] = s;
-    frame[1] = s;
-    // ESP32 I2S uses non-blocking writes; ConsumeSample returns false when DMA is full.
-    // AudioGeneratorWAV retries in loop() — we must spin/yield here for the same reason.
-    unsigned spin = 0;
-    while (!audioOut->ConsumeSample(frame)) {
-      yield();
-      if (++spin > 20000) break;   // avoid wedging if I2S never accepts
-    }
-    if ((i & 0xff) == 0) yield();
-  }
-  if (msgGen == g_wsConnectGeneration) {
-    lastRecAppendPcm(payload, length);
-  }
-  // Keep I2S fed for the duration of the WebSocket session; flush/stop happens in
-  // ws_pcm_disconnect_cleanup() when the client disconnects.
+  wsPlayWalkieChunk(samples, n, msgGen);
+  g_wsLastPcmMs = millis();
+  // Keep I2S fed for the duration of the WebSocket session; flush/stop in wsWalkieEndSession().
 }
 
 // ----- WS PCM queue (httpd task must not block on I2S ConsumeSample) -----
@@ -410,11 +447,48 @@ void drainWsPcmQueue() {
     return;
   }
   WsPcmQueueMsg msg;
-  while (xQueueReceive(g_wsPcmQ, &msg, 0) == pdTRUE) {
+  unsigned budget = 3;
+  while (budget-- > 0 && xQueueReceive(g_wsPcmQ, &msg, 0) == pdTRUE) {
     feedWsPcmToI2s(msg.payload, msg.len, msg.gen);
     free(msg.payload);
   }
   xSemaphoreGive(g_walkieAudioMux);
+}
+
+void wsWalkieEndSession(const char* reason) {
+  if (reason && reason[0]) {
+    Serial.printf("[WS] walkie end: %s\n", reason);
+  }
+  bool locked = false;
+  if (g_walkieAudioMux &&
+      xSemaphoreTake(g_walkieAudioMux, pdMS_TO_TICKS(500)) == pdTRUE) {
+    locked = true;
+  }
+  g_wsConnectGeneration++;
+  wsPcmDiscardQueued();
+  lastRecCloseAndPatch();
+  const bool hadWalkie = g_wsPcmRatePrimed;
+  if (hadWalkie) {
+    beakAnim.stop();
+    if (audioOut) {
+      audioOut->flush();
+      audioOut->stop();
+    }
+  }
+  g_wsTalkerIp = "";
+  resetWsPcmStreamState();
+  g_wsLastPcmMs = 0;
+  if (locked) {
+    xSemaphoreGive(g_walkieAudioMux);
+  }
+}
+
+static void wsWalkieWatchdog() {
+  if (!g_wsPcmRatePrimed) return;
+  if (g_wsLastPcmMs == 0) return;
+  if (millis() - g_wsLastPcmMs > 600) {
+    wsWalkieEndSession("idle timeout");
+  }
 }
 
 bool startPlayback(const String &clipName) {
@@ -436,9 +510,9 @@ bool startPlayback(const String &clipName) {
 
   // Apply pitch to the output BEFORE begin() so the multiplier is in
   // effect when AudioGeneratorWAV::begin() calls audioOut->SetRate(wavRate).
-  // Cheap pitch shift via sample-rate scaling - also changes duration.
-  // TODO: real-time pitch-preserving shift for the live mic stream path.
-  audioOut->pitchMultiplier = audioPitch;
+  // last_recording.wav already contains parrot-pitched PCM from walkie capture.
+  const bool alreadyPitched = (clipName == "last_recording");
+  audioOut->pitchMultiplier = alreadyPitched ? 1.0f : audioPitch;
 
   if (!audioWav->begin(audioFile, audioOut)) {
     Serial.println("WAV begin failed");
@@ -542,6 +616,7 @@ void loop() {
 
   // Drain walkie PCM queued from the httpd WebSocket task (must not block there on I2S).
   drainWsPcmQueue();
+  wsWalkieWatchdog();
 
   // Pump audio samples to I2S while a clip is playing.
   if (audioWav && audioWav->isRunning()) {

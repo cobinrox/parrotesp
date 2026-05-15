@@ -882,8 +882,12 @@ function initUI() {
     holdButton.classList.add("active");
     startMic().catch((err) => console.error(err));
   });
-  holdButton.addEventListener("pointerup",     stopMic);
+  holdButton.addEventListener("pointerup", stopMic);
   holdButton.addEventListener("pointercancel", stopMic);
+  holdButton.addEventListener("lostpointercapture", stopMic);
+  window.addEventListener("pointerup", () => {
+    if (micActive) stopMic();
+  });
 
   const parrotSlider = document.getElementById("parrotSlider");
   const parrotValue  = document.getElementById("parrotValue");
