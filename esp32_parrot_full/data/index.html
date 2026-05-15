@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>ParrotESP (v0.2) 🦜</title>
+<title>ParrotESP 🦜</title>
 
 <style>
   /* Reset and body */
@@ -326,9 +326,9 @@
 </style>
 </head>
 <body>
-
+<!-- 0.4c: move test ws to admin page -->
 <div style="display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; justify-content:center;">
-  <h1>🦜 ParrotESP <span style="font-size:0.6em; color:#80cbc4;">(v0.4a)</span></h1>
+  <h1>🦜 ParrotESP <span style="font-size:0.6em; color:#80cbc4;">(v0.4c)</span></h1>
   <div id="statusLine" style="font-size:1rem; color:#aaa;">Status: initialising…</div>
 </div>
 <div id="parrot"></div>
@@ -350,20 +350,13 @@
 <div class="info-wrap">
   <button id="micRequestBtn" onclick="requestMic()">🎤 Enable Mic</button>
   <button class="info-btn" onclick="toggleTip('micTip')" type="button">i</button>
-  <div id="micTip" class="info-tip">Tap to grant microphone access. Required before you can use Hold to Talk. (Live PCM over WebSocket is not wired yet; use &quot;Test WS&quot; to verify <code>wss://…/ws</code>.)</div>
+  <div id="micTip" class="info-tip">Tap to grant microphone access. Required before you can use Hold to Talk.</div>
 </div>
 
 <div class="info-wrap">
   <button id="holdButton" class="ctrl-btn" disabled>HOLD TO<br>TALK (*)</button>
   <button class="info-btn" onclick="toggleTip('httTip')" type="button">i</button>
-  <div id="httTip" class="info-tip">Press and hold to speak — your voice will play through the parrot. PCM streaming is not wired yet; use &quot;Test WS&quot; below to verify the secure WebSocket path.</div>
-</div>
-
-<div class="info-wrap" style="max-width:340px; width:100%;">
-  <button type="button" class="quickBtn" id="wsEchoBtn" onclick="testWsEcho()">Test WS (echo + tone)</button>
-  <button class="info-btn" onclick="toggleTip('wsTip')" type="button">i</button>
-  <div id="wsTip" class="info-tip">Opens <code>wss://&lt;this-host&gt;/ws</code> (or <code>ws://…</code> if you opened the page over plain HTTP): text + tiny binary echo, then a PCM tone burst. Wait for startup clip to finish (or use /stop) before expecting the tone.</div>
-  <pre id="wsEchoOut" style="font-size:0.72rem; color:#aed581; margin-top:8px; white-space:pre-wrap; width:100%; max-height:120px; overflow:auto; background:#12121f; padding:8px; border-radius:6px; border:1px solid #333;"></pre>
+  <div id="httTip" class="info-tip">Press and hold to speak — your voice will play through the parrot.</div>
 </div>
 
 <button onclick="openReplayDialog()" class="quickBtn ctrl-btn save-replay-btn">Save / Replay</button>
@@ -459,6 +452,17 @@
       <div id="networkInfoTip" class="info-tip">View diagnostic information about your network connection. (ESP32 port shows AP info only — STA mode not yet implemented.)</div>
     </div>
     <button class="quickBtn" onclick="document.getElementById('networkInfoModal').showModal(); loadNetworkInfo()" style="width:100%; margin-top:6px;">📡 Network Info…</button>
+  </div>
+
+  <!-- WEBSOCKET (diagnostic) -->
+  <div class="dialog-section">
+    <div class="info-wrap">
+      <span class="dialog-label">WebSocket</span>
+      <button class="info-btn" onclick="toggleTip('wsTip')" type="button">i</button>
+      <div id="wsTip" class="info-tip">Opens <code>wss://&lt;this-host&gt;/ws</code> (or <code>ws://…</code> on plain HTTP): text + tiny binary echo, then a PCM tone burst. Wait for startup clip to finish (or use /stop) before expecting the tone.</div>
+    </div>
+    <button type="button" class="quickBtn" id="wsEchoBtn" onclick="testWsEcho()" style="width:100%; margin-top:6px;">Test WS (echo + tone)</button>
+    <pre id="wsEchoOut" style="font-size:0.72rem; color:#aed581; margin-top:8px; white-space:pre-wrap; width:100%; max-height:120px; overflow:auto; background:#12121f; padding:8px; border-radius:6px; border:1px solid #333; box-sizing:border-box;"></pre>
   </div>
 
   <!-- BEAK / HEAD CONTROLS -->

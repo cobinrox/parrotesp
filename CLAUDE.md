@@ -98,4 +98,4 @@ esp32_parrot_full/data
 4. Set the file upload speed to the 115K option
 
 4. Use the "littlefs" command up upload the files to the ESP.  Use ctrl-sh-P, choose littlefs, then the Upload option.
-5. When "COnnecting..." shows on the console, click the BOOT button on the ESP and hold until it shows that files are being uploaded
+5. When "COnnecting..." shows on the console, click the BOOT button on the ESP and hold until it shows that files are being Written (e.g. `Writing at 0x0033333...`)
