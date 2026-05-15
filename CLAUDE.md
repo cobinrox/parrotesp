@@ -25,7 +25,7 @@ You'll need
 - Also under the directory is a subdirectory, `data`, containing supporting files:
   - *.wav These are pre-recorded phrases that the parrot can be commanded to play back
   - index.html This is the web page
-  - You will also need to create YOUR OWN private/public key pair in this directory (see Public/Private Key Creation section below)
+  - IMPORTANT: You will also need to create YOUR OWN private/public key pair in this directory (see Public/Private Key Creation section below)
 
 ### Public/Private Key Creation
 The project's walkie-talkie feature requires that the browser has permission to use the microphone of the client (e.g. the micropohone of a cell phone), and that requires that the page be served over HTTPS.  Therefore we need to provide a valid or at least self-signed public/private key for the HTTPS/TLS protocol.  So you must create a public and private key for the project.  You can follow these basic steps to do this.  This example assumes using gitbash terminal on a Windows.
@@ -90,7 +90,7 @@ esp32_parrot_full/data
 - Max GND  -> GND 38
 
 
-## Notes about uploading prerecorded WAV files from parrotpi project to parrotesp project.
+## Notes about uploading prerecorded WAV files and contents of data subdirectory from parrotpi project to parrotesp project.
 1. This can be touchy, may have to try several times
 1. You'll need the arduino-littlefs-upload-1.x.x.visix plugin installed for the Arduino IDE.
 2. Put the .wav files under the ./data directory of the parrotesp folder.

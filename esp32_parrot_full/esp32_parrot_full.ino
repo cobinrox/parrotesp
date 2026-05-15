@@ -41,14 +41,14 @@
 #include <AudioGeneratorWAV.h>             //   (all <AudioXxx.h> headers come from the ESP8266Audio package)
 #include <AudioOutputI2S.h>               //
 
-const char* VERSION = "0.7.1";
+const char* VERSION = "0.7.2";
 // 0.3 — HTTPS :443 (esp_https_server) + WSS /ws (httpd WebSocket). Plain HTTP/WebSockets removed.
 // 0.4 — Live walkie-talkie PCM stream support.
 // 0.5 — WS PCM queued off httpd task; mutex + generation to avoid post-close I2S feed.
 // 0.6 — Tee walkie stream to /last_recording.wav + WAV header patch on disconnect.
 // 0.7 — Walkie parrot pitch: resample for last_recording only; live path plays raw 16 kHz PCM.
 // 0.7.1 — No sync PCM on full queue; drain budget per loop; idle watchdog clears stuck streaming.
-
+// 0.7.2 — Live pitch same as WAV playback; no sync from device; no UI sync.
 // ----- WiFi Access Point -----
 const char* AP_SSID     = "parrotpi-test";
 const char* AP_PASSWORD = "parrot1234";
@@ -69,7 +69,7 @@ const unsigned int BEAK_CHATTER_MS = 120;
 
 // ----- Audio defaults -----
 float audioVolume = 0.7f;   // 0.0..1.0  (Pi default tuned for indoor use)
-float audioPitch  = 1.0f;   // 0.5..2.0  (1.0 = no shift; changes duration too)
+float audioPitch  = 1.05f;  // 0.5..2.0  (1.0 = no shift; default +5% parrot)
 
 // ----- Pitch-aware I2S output -----
 // Subclass that intercepts SetRate so pitch is applied automatically

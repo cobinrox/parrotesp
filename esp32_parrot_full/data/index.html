@@ -328,7 +328,7 @@
 <body>
 
 <div style="display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; justify-content:center;">
-  <h1>🦜 ParrotESP <span style="font-size:0.6em; color:#80cbc4;">(v0.3)</span></h1>
+  <h1>🦜 ParrotESP <span style="font-size:0.6em; color:#80cbc4;">(v0.4a)</span></h1>
   <div id="statusLine" style="font-size:1rem; color:#aaa;">Status: initialising…</div>
 </div>
 <div id="parrot"></div>
@@ -343,8 +343,8 @@
 <!-- PITCH SLIDER -->
 <div style="width:280px; display:flex; gap:8px; align-items:center; margin-top:4px;">
   <span style="font-size:0.8rem; color:#aaa; white-space:nowrap; width:36px;">pitch</span>
-  <input id="parrotSlider" type="range" min="5" max="35" value="20" step="5" style="flex:1;">
-  <span id="parrotValue" style="width:36px; text-align:right; font-size:0.85rem;">+20%</span>
+  <input id="parrotSlider" type="range" min="0" max="35" value="5" step="5" style="flex:1;">
+  <span id="parrotValue" style="width:36px; text-align:right; font-size:0.85rem;">+0%</span>
 </div>
 
 <div class="info-wrap">
@@ -891,6 +891,7 @@ function initUI() {
 
   const parrotSlider = document.getElementById("parrotSlider");
   const parrotValue  = document.getElementById("parrotValue");
+  parrotSlider.disabled = true;
   parrotSlider.addEventListener("input", () => {
     const pct = parseInt(parrotSlider.value);
     parrotValue.textContent = "+" + pct + "%";
@@ -918,7 +919,7 @@ const sendVolume = debounce(async (pct) => {
 function setVolume(pct) { sendVolume(pct); }
 
 // ------------------------------------------------------------
-// Pitch — UI 5..35 means "+5%…+35%" → firmware pitch 1.05..1.35
+// Pitch — UI 0..35 means "+0%…+35%" → firmware pitch 1.00..1.35
 // ------------------------------------------------------------
 const sendParrot = debounce(async (pct) => {
   try {
@@ -1023,12 +1024,13 @@ async function refreshHardwareStatus() {
       }
     }
     if (typeof s.pitch === "number") {
-      const pct = Math.round((s.pitch - 1) * 100);
+      const pct = Math.max(0, Math.min(35, Math.round((s.pitch - 1) * 100)));
       const slider = document.getElementById("parrotSlider");
       if (document.activeElement !== slider) {
-        slider.value = Math.max(5, Math.min(35, pct));
+        slider.value = pct;
         document.getElementById("parrotValue").textContent = "+" + pct + "%";
       }
+      parrotSlider.disabled = false;
     }
   } catch (err) {
     console.error("status fetch failed:", err);
