@@ -41,7 +41,7 @@
 #include <AudioGeneratorWAV.h>             //   (all <AudioXxx.h> headers come from the ESP8266Audio package)
 #include <AudioOutputI2S.h>               //
 
-const char* VERSION = "0.7.3";
+const char* VERSION = "0.7.4";
 // 0.3 — HTTPS :443 (esp_https_server) + WSS /ws (httpd WebSocket). Plain HTTP/WebSockets removed.
 // 0.4 — Live walkie-talkie PCM stream support.
 // 0.5 — WS PCM queued off httpd task; mutex + generation to avoid post-close I2S feed.
@@ -50,6 +50,7 @@ const char* VERSION = "0.7.3";
 // 0.7.1 — No sync PCM on full queue; drain budget per loop; idle watchdog clears stuck streaming.
 // 0.7.2 — Live pitch same as WAV playback; no sync from device; no UI sync.
 // 0.7.3 — Compressed wav files
+// 0.7.4 — Walkie live + last_recording use WALKIE_PARROT_PITCH; clip playback uses UI audioPitch.
 // ----- WiFi Access Point -----
 const char* AP_SSID     = "parrotpi-test";
 const char* AP_PASSWORD = "parrot1234";
@@ -71,6 +72,10 @@ const unsigned int BEAK_CHATTER_MS = 120;
 // ----- Audio defaults -----
 float audioVolume = 0.7f;   // 0.0..1.0  (Pi default tuned for indoor use)
 float audioPitch  = 1.05f;  // 0.5..2.0  (1.0 = no shift; default +5% parrot)
+
+// Walkie-talkie only: fixed chipmunk/parrot raise (live speaker + /last_recording.wav).
+// WAV clip playback uses audioPitch from the UI slider, on top of whatever is in the file.
+const float WALKIE_PARROT_PITCH = 1.2f;   // +20%; tweak this constant to taste
 
 // ----- Pitch-aware I2S output -----
 // Subclass that intercepts SetRate so pitch is applied automatically
@@ -324,9 +329,9 @@ static void wsConsumeInt16Mono(int16_t s) {
   }
 }
 
-// ParrotPi-style pitch: out_len = in_len / parrot_factor, linear interp. I2S stays 16 kHz.
+// ParrotPi-style pitch: out_len = in_len / factor, linear interp. I2S stays 16 kHz.
 static size_t wsParrotResampleInPlace(const int16_t* in, size_t nIn, int16_t* out, size_t outCap) {
-  const float pf = audioPitch;
+  const float pf = WALKIE_PARROT_PITCH;
   if (nIn == 0 || !in || !out || outCap == 0) return 0;
   if (pf < 1.001f || nIn < 64) {
     size_t c = (nIn < outCap) ? nIn : outCap;
@@ -350,17 +355,18 @@ static size_t wsParrotResampleInPlace(const int16_t* in, size_t nIn, int16_t* ou
   return outN;
 }
 
-// Live: raw PCM at 16 kHz (fast, keeps realtime). File: parrot-pitched resample only.
+// Live + file: same WALKIE_PARROT_PITCH resample (what you hear is what gets saved).
 static void wsPlayWalkieChunk(const int16_t* in, size_t nIn, uint32_t msgGen) {
   if (nIn > 1024) nIn = 1024;
-  for (size_t i = 0; i < nIn; i++) {
-    if (msgGen != g_wsConnectGeneration) return;
-    wsConsumeInt16Mono(in[i]);
-    if ((i & 0xff) == 0) yield();
-  }
   int16_t pitched[1024];
   const size_t outN = wsParrotResampleInPlace(in, nIn, pitched, 1024);
-  if (msgGen == g_wsConnectGeneration && outN > 0) {
+  if (outN == 0) return;
+  for (size_t i = 0; i < outN; i++) {
+    if (msgGen != g_wsConnectGeneration) return;
+    wsConsumeInt16Mono(pitched[i]);
+    if ((i & 0xff) == 0) yield();
+  }
+  if (msgGen == g_wsConnectGeneration) {
     lastRecAppendPcm(reinterpret_cast<const uint8_t*>(pitched), outN * sizeof(int16_t));
   }
 }
@@ -392,8 +398,8 @@ static void feedWsPcmToI2s(const uint8_t* payload, size_t length, uint32_t msgGe
       Serial.println("[WS] audioOut->begin() failed");
       return;
     }
-    Serial.printf("[WS] PCM primed: 16 kHz mono (parrot x%.2f, frame %u B)\n",
-                  audioPitch, (unsigned)length);
+    Serial.printf("[WS] PCM primed: 16 kHz mono (walkie x%.2f, frame %u B)\n",
+                  WALKIE_PARROT_PITCH, (unsigned)length);
     g_wsPcmRatePrimed = true;
     beakAnim.start("mic");
     lastRecOpenPlaceholderWav();
@@ -509,11 +515,10 @@ bool startPlayback(const String &clipName) {
   audioWav  = new AudioGeneratorWAV();
   audioOut->SetGain(audioVolume);
 
-  // Apply pitch to the output BEFORE begin() so the multiplier is in
-  // effect when AudioGeneratorWAV::begin() calls audioOut->SetRate(wavRate).
-  // last_recording.wav already contains parrot-pitched PCM from walkie capture.
-  const bool alreadyPitched = (clipName == "last_recording");
-  audioOut->pitchMultiplier = alreadyPitched ? 1.0f : audioPitch;
+  // Apply UI pitch BEFORE begin() so the multiplier is in effect when
+  // AudioGeneratorWAV::begin() calls audioOut->SetRate(wavRate).
+  // last_recording.wav already has WALKIE_PARROT_PITCH baked in; UI pitch stacks on replay.
+  audioOut->pitchMultiplier = audioPitch;
 
   if (!audioWav->begin(audioFile, audioOut)) {
     Serial.println("WAV begin failed");
