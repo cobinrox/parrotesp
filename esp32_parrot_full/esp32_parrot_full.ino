@@ -41,7 +41,7 @@
 #include <AudioGeneratorWAV.h>             //   (all <AudioXxx.h> headers come from the ESP8266Audio package)
 #include <AudioOutputI2S.h>               //
 
-const char* VERSION = "0.7.2";
+const char* VERSION = "0.7.3";
 // 0.3 — HTTPS :443 (esp_https_server) + WSS /ws (httpd WebSocket). Plain HTTP/WebSockets removed.
 // 0.4 — Live walkie-talkie PCM stream support.
 // 0.5 — WS PCM queued off httpd task; mutex + generation to avoid post-close I2S feed.
@@ -49,6 +49,7 @@ const char* VERSION = "0.7.2";
 // 0.7 — Walkie parrot pitch: resample for last_recording only; live path plays raw 16 kHz PCM.
 // 0.7.1 — No sync PCM on full queue; drain budget per loop; idle watchdog clears stuck streaming.
 // 0.7.2 — Live pitch same as WAV playback; no sync from device; no UI sync.
+// 0.7.3 — Compressed wav files
 // ----- WiFi Access Point -----
 const char* AP_SSID     = "parrotpi-test";
 const char* AP_PASSWORD = "parrot1234";
@@ -604,7 +605,7 @@ void setup() {
   // audio + servo + LittleFS all came up. Failures here are non-fatal:
   // if test.wav isn't on flash, we just log and move on.
   Serial.println("Startup self-test: playing /test.wav ...");
-  if (!startPlayback("test")) {
+  if (!startPlayback("squawk")) {
     Serial.println("Startup self-test: /test.wav not found - skipping");
   }
 }
