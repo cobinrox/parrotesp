@@ -51,8 +51,7 @@ const char* VERSION = "0.7.4";
 // 0.7.3 — Compressed wav files
 // 0.7.4 — Walkie live + last_recording use WALKIE_PARROT_PITCH; clip playback uses UI audioPitch.
 // ----- WiFi Access Point -----
-const char* AP_SSID     = "parrotpi-test";
-const char* AP_PASSWORD = "parrot1234";
+const char* AP_SSID     = "parrotpi";
 
 // ----- Hardware pins -----
 const int LED_PIN   = 4;
@@ -588,7 +587,7 @@ void setup() {
 
   // WiFi AP
   WiFi.mode(WIFI_AP);
-  if (!WiFi.softAP(AP_SSID, AP_PASSWORD)) {
+  if (!WiFi.softAP(AP_SSID)) {
     Serial.println("ERROR: softAP failed - halting");
     while (true) delay(1000);
   }
