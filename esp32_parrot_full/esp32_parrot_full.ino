@@ -6,7 +6,6 @@
 //   GET /beak/angle?deg=N               - servo to N degrees (rejected while busy)
 //   GET /play?clip=NAME                 - play /NAME.wav from LittleFS
 //                                         beak chatters while playing, closes at end
-//   GET /stop                           - stop current playback
 //   GET /clips                          - list available WAV clips (JSON)
 //   GET /volume?v=N                     - audio gain 0.0..1.0
 //   GET /pitch?p=N                      - pitch 0.5..2.0 (cheap: changes
@@ -203,8 +202,8 @@ void stopPlayback() {
     audioFile = nullptr;
   }
   if (currentClip.length() > 0) {
-    // Hand the beak back regardless of how playback ended (natural end, /stop,
-    // /restart, or another /play interrupting). Idempotent if not active.
+    // Hand the beak back regardless of how playback ended (natural end, /restart,
+    // or another /play interrupting). Idempotent if not active.
     beakAnim.stop();
   }
   currentClip = "";
@@ -381,7 +380,7 @@ static void feedWsPcmToI2s(const uint8_t* payload, size_t length, uint32_t msgGe
     uint32_t now = millis();
     if (now - s_lastDropLog > 2000) {
       s_lastDropLog = now;
-      Serial.println("[WS] PCM dropped while WAV clip is playing (/stop or wait for end)");
+      Serial.println("[WS] PCM dropped while WAV clip is playing (wait for end)");
     }
     return;
   }

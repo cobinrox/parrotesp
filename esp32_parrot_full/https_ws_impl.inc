@@ -159,11 +159,6 @@ static esp_err_t uri_play(httpd_req_t *req) {
   return send_json(req, 404, String("{\"error\":\"clip not found: ") + c + "\"}");
 }
 
-static esp_err_t uri_stop(httpd_req_t *req) {
-  stopPlayback();
-  return send_json(req, 200, String("{\"playing\":\"\"}"));
-}
-
 static esp_err_t uri_clips(httpd_req_t *req) {
   String body = "{\"clips\":[";
   File root = LittleFS.open("/");
@@ -334,7 +329,6 @@ static esp_err_t register_parrot_uris(httpd_handle_t hd) {
   const httpd_uri_t u_bc = UGET("/beak/close", uri_beak_close);
   const httpd_uri_t u_ba = UGET("/beak/angle", uri_beak_angle);
   const httpd_uri_t u_play = UGET("/play", uri_play);
-  const httpd_uri_t u_stop = UGET("/stop", uri_stop);
   const httpd_uri_t u_clips = UGET("/clips", uri_clips);
   const httpd_uri_t u_vol = UGET("/volume", uri_volume);
   const httpd_uri_t u_pitch = UGET("/pitch", uri_pitch);
@@ -352,7 +346,7 @@ static esp_err_t register_parrot_uris(httpd_handle_t hd) {
   };
 
   const httpd_uri_t *const all[] = {&u_root, &u_on, &u_off, &u_status, &u_net, &u_bo, &u_bc, &u_ba,
-                                    &u_play, &u_stop, &u_clips, &u_vol, &u_pitch, &u_rst, &u_ws};
+                                    &u_play, &u_clips, &u_vol, &u_pitch, &u_rst, &u_ws};
   esp_err_t last = ESP_OK;
   for (unsigned i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
     esp_err_t r = httpd_register_uri_handler(hd, all[i]);

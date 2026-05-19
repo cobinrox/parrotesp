@@ -44,7 +44,14 @@
     -webkit-user-select: none;
     touch-action: none;
   }
-  #holdButton.active {
+  /* Held: connecting (don't speak yet) */
+  #holdButton.warming {
+    background: radial-gradient(circle at 40% 35%, #ffca28, #f57f17);
+    box-shadow: 0 0 0 10px #ffca2855, 0 8px 32px #0009;
+    transform: scale(0.96);
+  }
+  /* Held: mic + WSS ready (speak now) */
+  #holdButton.live {
     background: radial-gradient(circle at 40% 35%, #ef5350, #b71c1c);
     box-shadow: 0 0 0 12px #ef535055, 0 8px 32px #0009;
     transform: scale(0.96);
@@ -326,9 +333,9 @@
 </style>
 </head>
 <body>
-<!-- 0.4d: compressed wav files -->
+<!-- 0.4e: walkie talkie button color change after 3 sec -->
 <div style="display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; justify-content:center;">
-  <h1>🦜 ParrotESP <span style="font-size:0.6em; color:#80cbc4;">(v0.4d)</span></h1>
+  <h1>🦜 ParrotESP <span style="font-size:0.6em; color:#80cbc4;">(v0.4e)</span></h1>
   <div id="statusLine" style="font-size:1rem; color:#aaa;">Status: initialising…</div>
 </div>
 <div id="parrot"></div>
@@ -356,7 +363,7 @@
 <div class="info-wrap">
   <button id="holdButton" class="ctrl-btn" disabled>HOLD TO<br>TALK (*)</button>
   <button class="info-btn" onclick="toggleTip('httTip')" type="button">i</button>
-  <div id="httTip" class="info-tip">Press and hold to speak — your voice will play through the parrot.</div>
+  <div id="httTip" class="info-tip">Press and hold. Wait for the button to turn red (Speak now), then talk. Yellow means still connecting.</div>
 </div>
 
 <button onclick="openReplayDialog()" class="quickBtn ctrl-btn save-replay-btn">Save / Replay</button>
@@ -378,25 +385,13 @@
   </div>
 </div>
 
-<!-- STOP / RESTART / SHUTDOWN / ADMIN BUTTONS -->
+<!-- RESTART / ADMIN BUTTONS -->
 <div style="margin-top:24px; border-top:1px solid #333; padding-top:16px; width:100%; display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
-  <button id="stopBtn" onclick="stopAll()"
-    style="padding:6px 16px; font-size:0.8rem; font-weight:bold; border-radius:8px;
-           cursor:pointer; background:#c62828; color:#fff; border:2px solid #ff5252;
-           letter-spacing:1px; box-shadow:0 0 14px #c6282866; transition:background 0.15s;">
-    ⛔ Stop
-  </button>
   <button id="restartBtn" onclick="restartServer()"
     style="padding:6px 16px; font-size:0.8rem; font-weight:bold; border-radius:8px;
            cursor:pointer; background:#4a0000; color:#ff8a80; border:1px solid #c62828;
            letter-spacing:1px; transition:background 0.15s;">
     ⟳ Restart
-  </button>
-  <button id="shutdownBtn" disabled title="Not applicable on ESP32"
-    style="padding:6px 16px; font-size:0.8rem; font-weight:bold; border-radius:8px;
-           cursor:not-allowed; background:#7b1fa2; color:#fff; border:2px solid #ce93d8;
-           letter-spacing:1px; box-shadow:0 0 10px #7b1fa266; opacity:0.4;">
-    ⏻ Shutdown
   </button>
   <button onclick="document.getElementById('adminDialog').showModal()"
     style="padding:6px 16px; font-size:0.8rem; font-weight:bold; border-radius:8px;
@@ -459,7 +454,7 @@
     <div class="info-wrap">
       <span class="dialog-label">WebSocket</span>
       <button class="info-btn" onclick="toggleTip('wsTip')" type="button">i</button>
-      <div id="wsTip" class="info-tip">Opens <code>wss://&lt;this-host&gt;/ws</code> (or <code>ws://…</code> on plain HTTP): text + tiny binary echo, then a PCM tone burst. Wait for startup clip to finish (or use /stop) before expecting the tone.</div>
+      <div id="wsTip" class="info-tip">Opens <code>wss://&lt;this-host&gt;/ws</code> (or <code>ws://…</code> on plain HTTP): text + tiny binary echo, then a PCM tone burst. Wait for the startup clip to finish before expecting the tone.</div>
     </div>
     <button type="button" class="quickBtn" id="wsEchoBtn" onclick="testWsEcho()" style="width:100%; margin-top:6px;">Test WS (echo + tone)</button>
     <pre id="wsEchoOut" style="font-size:0.72rem; color:#aed581; margin-top:8px; white-space:pre-wrap; width:100%; max-height:120px; overflow:auto; background:#12121f; padding:8px; border-radius:6px; border:1px solid #333; box-sizing:border-box;"></pre>
@@ -550,6 +545,33 @@ let micMuteNode = null;
 const holdButton  = document.getElementById("holdButton");
 const meterWrap   = document.getElementById("meterWrap");
 const vuBar       = document.getElementById("vuBar");
+
+const HOLD_BTN_IDLE_HTML = "HOLD TO<br>TALK (*)";
+const WALKIE_MIN_WARMUP_MS = 600;   // min yellow time so "wait" is visible
+let micHoldInProgress = false;
+
+function delay(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function setHoldButtonIdle() {
+  micHoldInProgress = false;
+  holdButton.classList.remove("warming", "live", "active");
+  holdButton.innerHTML = HOLD_BTN_IDLE_HTML;
+}
+
+function setHoldButtonWarming() {
+  micHoldInProgress = true;
+  holdButton.classList.remove("live", "active");
+  holdButton.classList.add("warming");
+  holdButton.innerHTML = "WAIT…<br><span style='font-size:0.7em;font-weight:normal'>connecting</span>";
+}
+
+function setHoldButtonLive() {
+  holdButton.classList.remove("warming", "active");
+  holdButton.classList.add("live");
+  holdButton.innerHTML = "SPEAK<br>NOW";
+}
 
 // AudioWorklet: resample browser rate → 16 kHz mono int16, 1024-sample binary chunks + vu RMS.
 const PARROT_MIC_WORKLET_CODE = String.raw`
@@ -801,6 +823,7 @@ function waitForMicWsOpen(ws, session) {
 async function startMic() {
   if (!micReady) return;
   const session = micHoldSession;
+  const warmupT0 = performance.now();
   teardownMicPipeline();
   try {
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -853,14 +876,21 @@ async function startMic() {
     micWorkletNode.connect(micMuteNode);
     micMuteNode.connect(micAudioCtx.destination);
 
+    const remain = WALKIE_MIN_WARMUP_MS - (performance.now() - warmupT0);
+    if (remain > 0) await delay(remain);
+    if (session !== micHoldSession) {
+      teardownMicPipeline();
+      return;
+    }
+
+    setHoldButtonLive();
     micActive = true;
     meterWrap.classList.add("visible");
   } catch (err) {
     console.error("startMic failed:", err);
     teardownMicPipeline();
     micActive = false;
-    holdButton.classList.remove("active");
-    holdButton.style.background = `radial-gradient(circle at 40% 35%, #4caf50, #1b5e20)`;
+    setHoldButtonIdle();
     meterWrap.classList.remove("visible");
     vuBar.style.width = "0%";
   }
@@ -869,8 +899,7 @@ async function startMic() {
 function stopMic() {
   micHoldSession++;
   micActive = false;
-  holdButton.classList.remove("active");
-  holdButton.style.background = `radial-gradient(circle at 40% 35%, #4caf50, #1b5e20)`;
+  setHoldButtonIdle();
   meterWrap.classList.remove("visible");
   vuBar.style.width = "0%";
   teardownMicPipeline();
@@ -883,14 +912,14 @@ function initUI() {
   holdButton.addEventListener("pointerdown", (e) => {
     if (holdButton.disabled || !micReady) return;
     holdButton.setPointerCapture(e.pointerId);
-    holdButton.classList.add("active");
+    setHoldButtonWarming();
     startMic().catch((err) => console.error(err));
   });
   holdButton.addEventListener("pointerup", stopMic);
   holdButton.addEventListener("pointercancel", stopMic);
   holdButton.addEventListener("lostpointercapture", stopMic);
   window.addEventListener("pointerup", () => {
-    if (micActive) stopMic();
+    if (micHoldInProgress || micActive) stopMic();
   });
 
   const parrotSlider = document.getElementById("parrotSlider");
@@ -999,10 +1028,10 @@ function setHardwareStatus(busy, reason) {
     statusLine.textContent = `Status: ${statusText}`;
     document.title = `ParrotPi: ${statusText}`;
   }
-  // Lock all ctrl-btn elements (STOP/Restart/Admin are outside the class on purpose)
+  // Lock all ctrl-btn elements (Restart/Admin are outside the class on purpose)
   document.querySelectorAll(".ctrl-btn").forEach(btn => {
     if (btn === holdButton) {
-      btn.disabled = (busy || !micReady) && !micActive;
+      btn.disabled = (busy || !micReady) && !micActive && !micHoldInProgress;
     } else {
       btn.disabled = busy;
     }
@@ -1042,16 +1071,8 @@ async function refreshHardwareStatus() {
 }
 
 // ------------------------------------------------------------
-// Stop / Restart / Shutdown (shutdown disabled on ESP32)
+// Restart
 // ------------------------------------------------------------
-async function stopAll() {
-  try {
-    stopMic();
-    await api("/stop");
-    await refreshHardwareStatus();
-  } catch (err) { console.error("stop failed:", err); }
-}
-
 async function restartServer() {
   if (!confirm("Restart the ESP32?")) return;
   const btn = document.getElementById("restartBtn");
