@@ -91,14 +91,18 @@ esp32_parrot_full/data
 ## Notes about Beak Servo Pins
 -  Servo Orange -> ESP +5 (19)
 -  Servo Brown  -> ESP GND (38)
--  Serv Yellow -> ESP GPIO 17 (30)
+-  Serv Yellow -> ESP GPIO 18 (30)
 
 ## Notes about Max357 Audio Card
-- Max BCLK -> GPIO 27 (11)
-- Max LRC  -> GPIO 26 (10)
-- Max DIN  -> GPIO 25 (9)
-- Max Vin  -> 5v (19)
-- Max GND  -> GND 38
+- Max BCLK -> ESP GPIO 27 (11)
+- Max LRC  -> ESP GPIO 26 (10)
+- Max DIN  -> ESP GPIO 25 (9)
+- Max Vin  -> ESP 5v (19)
+- Max GND  -> ESP GND (38)
+
+## (Optional) Notes about RST Momentary External Switch
+- Switch Pin A -> ESP RESET/EN (2)
+- Switch Pin B -> ESP GND (14)
 
 
 ## Notes about uploading prerecorded WAV files and contents of data subdirectory from parrotpi project to parrotesp project.
